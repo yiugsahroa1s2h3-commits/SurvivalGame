@@ -7,6 +7,9 @@ scene.background = new THREE.Color(0x87ceeb);
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 document.body.appendChild(renderer.domElement);
 
 // 2. ライト
@@ -17,10 +20,11 @@ scene.add(new THREE.AmbientLight(0x707070));
 
 // 3. 海
 const oceanGeo = new THREE.PlaneGeometry(3000, 3000);
-const oceanMat = new THREE.MeshLambertMaterial({ color: 0x1e90ff, transparent: true, opacity: 0.8 });
+const oceanMat = new THREE.MeshLambertMaterial({ color: 0x1e90ff });
 const ocean = new THREE.Mesh(oceanGeo, oceanMat);
 ocean.rotation.x = -Math.PI / 2;
-ocean.position.y = -0.3;
+const SEA_LEVEL = 0;
+ocean.position.y = SEA_LEVEL;
 scene.add(ocean);
 
 // --- 疑似ノイズ生成（島の名前から固定シードを作り、毎回同じいびつな形になるようにする） ---
@@ -130,7 +134,7 @@ function getCurrentIslandName(x: number, z: number): string {
 // 見た目の地形メッシュを高さマップから生成（当たり判定と完全一致させる）
 function buildTerrainMesh(): THREE.Mesh {
   const size = 2200;
-  const segments = 220;
+  const segments = 160;
   const geo = new THREE.PlaneGeometry(size, size, segments, segments);
   geo.rotateX(-Math.PI / 2);
 
@@ -318,7 +322,7 @@ function showDamageNumber(target: THREE.Object3D, damage: number) {
       const box = new THREE.Box3().setFromObject(target);
       const p = new THREE.Vector3(
         (box.min.x + box.max.x) * 0.5,
-        box.max.y + 0.35,
+        box.max.y + 0.15,
         (box.min.z + box.max.z) * 0.5
       );
       return p;
@@ -451,24 +455,24 @@ function createTreeResource(
   const group = new THREE.Group();
 
   const trunk = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.4 * scale, 0.5 * scale, 3 * scale, 8),
+    new THREE.CylinderGeometry(0.65 * scale, 0.85 * scale, 8 * scale, 8),
     new THREE.MeshLambertMaterial({ color: 0x8b4513 })
   );
-  trunk.position.y = 1.5 * scale;
+  trunk.position.y = 4 * scale;
   group.add(trunk);
 
   const leaves = new THREE.Mesh(
-    new THREE.ConeGeometry(2.5 * scale, 5 * scale, 8),
+    new THREE.ConeGeometry(3.5 * scale, 7.5 * scale, 10),
     new THREE.MeshLambertMaterial({ color: 0x228b22 })
   );
-  leaves.position.y = 5 * scale;
+  leaves.position.y = 9 * scale;
   group.add(leaves);
 
   group.position.set(x, groundY, z);
   scene.add(group);
 
   const health = treeDurability[size];
-  return {
+  const node: ResourceNode = {
     mesh: group,
     name: `${getResourceSizeName(size)}木`,
     itemId: 'wood',
@@ -481,6 +485,8 @@ function createTreeResource(
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
   };
+  group.traverse((child) => { child.userData.resourceNode = node; });
+  return node;
 }
 
 function createRockResource(
@@ -498,7 +504,7 @@ function createRockResource(
   scene.add(mesh);
 
   const health = rockDurability[size];
-  return {
+  const node: ResourceNode = {
     mesh,
     name: `${getResourceSizeName(size)}岩`,
     itemId: 'stone',
@@ -511,6 +517,8 @@ function createRockResource(
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
   };
+  mesh.userData.resourceNode = node;
+  return node;
 }
 
 function createPickupResource(
@@ -524,18 +532,41 @@ function createPickupResource(
 ): ResourceNode {
   const colors: Record<string, number> = {
     leaf: 0x3fa34d,
+    high_grade_wood: 0x6b3f20,
+    hide: 0xd2b48c,
     clay: 0xb66a50,
     iron_fragment: 0x9aa0a6,
     berry: 0xd94b6b,
     mushroom: 0xc8b24a,
   };
-  const mesh = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.22 + Math.random() * 0.12, 0),
-    new THREE.MeshLambertMaterial({ color: colors[itemId] ?? 0x7aa35a })
-  );
-  mesh.position.set(x, groundY + 0.25, z);
+
+  // 拾える資源は1個の立体メッシュにまとめる。見た目を保ちつつ描画負荷を抑える。
+  let geometry: THREE.BufferGeometry;
+  if (itemId === 'leaf' || itemId === 'high_grade_wood') {
+    geometry = new THREE.SphereGeometry(0.65, 6, 4);
+  } else if (itemId === 'clay') {
+    geometry = new THREE.DodecahedronGeometry(0.75, 0);
+  } else if (itemId === 'iron_fragment') {
+    geometry = new THREE.BoxGeometry(1.0, 0.3, 0.65);
+  } else if (itemId === 'berry') {
+    geometry = new THREE.IcosahedronGeometry(0.55, 0);
+  } else if (itemId === 'mushroom') {
+    geometry = new THREE.SphereGeometry(0.55, 7, 5);
+  } else {
+    geometry = new THREE.IcosahedronGeometry(0.6, 0);
+  }
+
+  const material = new THREE.MeshLambertMaterial({ color: colors[itemId] ?? 0x7aa35a });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set(x, groundY + 0.35, z);
+  mesh.rotation.set(0, Math.random() * Math.PI * 2, itemId === 'leaf' ? 0.35 : 0);
+
+  if (itemId === 'leaf') mesh.scale.set(1.4, 0.3, 0.9);
+  else if (itemId === 'iron_fragment') mesh.rotation.z = 0.25;
+  else if (itemId === 'mushroom') mesh.scale.y = 0.75;
+
   scene.add(mesh);
-  return {
+  const node: ResourceNode = {
     mesh,
     name: itemName,
     itemId,
@@ -548,6 +579,8 @@ function createPickupResource(
     resourceSize: 'small',
     islandName,
   };
+  mesh.userData.resourceNode = node;
+  return node;
 }
 
 function randomPointOnIsland(isl: IslandData, margin: number): { x: number; z: number; groundY: number } | null {
@@ -588,7 +621,7 @@ function spawnIslandResources(
 
   for (const [itemId, count] of Object.entries(pickupCounts)) {
     const names: Record<string, string> = {
-      leaf: '葉', clay: '粘土', iron_fragment: '鉄の破片', berry: 'ベリー', mushroom: 'キノコ'
+      leaf: '葉', high_grade_wood: '高級木材', hide: '皮', clay: '粘土', iron_fragment: '鉄の破片', berry: 'ベリー', mushroom: 'キノコ'
     };
     for (let i = 0; i < count; i++) {
       const point = randomPointOnIsland(isl, 8);
@@ -606,14 +639,18 @@ function spawnIslandResources(
 // オールドシティ：基本資源に加えて鉄の破片・粘土を多めにする。
 // スゥイート：木・石は少なめ、食料系を多めにする。
 function spawnAllIslandResources() {
-  spawnIslandResources(islands[0], 70, 45, { leaf: 180, clay: 35, berry: 25 });
-  spawnIslandResources(islands[1], 190, 25, { leaf: 420, berry: 60, mushroom: 45, clay: 30 });
-  spawnIslandResources(islands[2], 15, 12, { leaf: 30, clay: 90, iron_fragment: 120 });
-  spawnIslandResources(islands[3], 18, 150, { stone: 0, iron_fragment: 90, clay: 25 });
-  spawnIslandResources(islands[4], 12, 18, { leaf: 35, berry: 140, mushroom: 80 });
+  // グリーンアイランド：草地を中心に、木・石・葉・粘土・食料を幅広く大量配置。
+  spawnIslandResources(islands[0], 90, 60, { leaf: 320, clay: 70, berry: 60, mushroom: 30, high_grade_wood: 8 });
+  // フォレストアイランド：木を圧倒的に多く、葉も大量。
+  spawnIslandResources(islands[1], 240, 35, { leaf: 700, berry: 80, mushroom: 80, clay: 50, high_grade_wood: 40 });
+  // オールドシティアイランド：木・石は少なめ、鉄の破片と粘土を大量配置。
+  spawnIslandResources(islands[2], 18, 18, { leaf: 60, clay: 160, iron_fragment: 220, hide: 20 });
+  // マウンテンアイランド：石を圧倒的に多く、鉄の破片も少し配置。
+  spawnIslandResources(islands[3], 22, 220, { leaf: 40, iron_fragment: 120, clay: 55 });
+  // スゥイートアイランド：木・石は少なめ、食料系を大量配置。
+  spawnIslandResources(islands[4], 18, 22, { leaf: 70, berry: 280, mushroom: 150, clay: 25 });
 }
 
-spawnAllIslandResources();
 
 // --- インベントリ ＆ クラフト ---
 let isInventoryOpen = false;
@@ -639,35 +676,38 @@ const craftRecipes: Recipe[] = [
   // 基本加工
   { id: 'rope', name: '縄', resultCount: 1, ingredients: [{ id: 'leaf', name: '葉', count: 3 }] },
 
+  // 金属加工
+  { id: 'iron_ingot', name: '鉄の延べ棒', resultCount: 1, ingredients: [{ id: 'iron_fragment', name: '鉄の破片', count: 3 }] },
+
   // 武器・道具
   { id: 'wooden_spear', name: '木槍', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 10 }, { id: 'rope', name: '縄', count: 2 }] },
   { id: 'stone_spear', name: '石槍', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 8 }, { id: 'wood', name: '木材', count: 10 }, { id: 'rope', name: '縄', count: 2 }] },
-  { id: 'iron_spear', name: '鉄槍', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄インゴット', count: 8 }, { id: 'wood', name: '木材', count: 10 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'iron_spear', name: '鉄槍', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄の延べ棒', count: 8 }, { id: 'wood', name: '木材', count: 10 }, { id: 'rope', name: '縄', count: 2 }] },
   { id: 'hammer', name: 'ハンマー', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 12 }, { id: 'wood', name: '木材', count: 8 }] },
-  { id: 'iron_axe', name: '鉄斧', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄インゴット', count: 10 }, { id: 'wood', name: '木材', count: 8 }, { id: 'rope', name: '縄', count: 2 }] },
-  { id: 'iron_pickaxe', name: '鉄ピッケル', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄インゴット', count: 12 }, { id: 'wood', name: '木材', count: 8 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'iron_axe', name: '鉄斧', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄の延べ棒', count: 10 }, { id: 'wood', name: '木材', count: 8 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'iron_pickaxe', name: '鉄ピッケル', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄の延べ棒', count: 12 }, { id: 'wood', name: '木材', count: 8 }, { id: 'rope', name: '縄', count: 2 }] },
 
   // 建築
   { id: 'wooden_floor', name: '木の床', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 200 }, { id: 'rope', name: '縄', count: 2 }] },
   { id: 'wooden_wall', name: '木の壁', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 150 }, { id: 'rope', name: '縄', count: 2 }] },
   { id: 'wooden_ceiling', name: '木の天井', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 150 }, { id: 'rope', name: '縄', count: 2 }] },
-  { id: 'stone_floor', name: '石の床', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 250 }, { id: 'iron_fragment', name: '鉄の破片', count: 5 }] },
-  { id: 'stone_wall', name: '石の壁', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 200 }, { id: 'iron_fragment', name: '鉄の破片', count: 5 }] },
-  { id: 'iron_floor', name: '鉄の床', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄インゴット', count: 30 }] },
-  { id: 'iron_wall', name: '鉄の壁', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄インゴット', count: 25 }] },
+  { id: 'stone_floor', name: '石の床', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 50 }, { id: 'rope', name: '縄', count: 3 }, { id: 'stone', name: '石', count: 250 }] },
+  { id: 'stone_wall', name: '石の壁', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 50 }, { id: 'rope', name: '縄', count: 3 }, { id: 'stone', name: '石', count: 150 }] },
+  { id: 'iron_floor', name: '鉄の床', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 50 }, { id: 'iron_fragment', name: '鉄の破片', count: 100 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'iron_wall', name: '鉄の壁', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 50 }, { id: 'iron_fragment', name: '鉄の破片', count: 100 }, { id: 'rope', name: '縄', count: 5 }] },
 
   // 拠点設備・防衛・収納
   { id: 'toolbox', name: 'ツールボックス', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 400 }, { id: 'rope', name: '縄', count: 30 }, { id: 'stone', name: '石', count: 50 }] },
   { id: 'campfire', name: '焚火', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 20 }, { id: 'stone', name: '石', count: 30 }] },
-  { id: 'furnace', name: '炉', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 100 }, { id: 'clay', name: '粘土', count: 50 }] },
-  { id: 'cooking_station', name: '調理台', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 100 }, { id: 'stone', name: '石', count: 50 }] },
-  { id: 'workbench', name: '作業台', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 150 }, { id: 'stone', name: '石', count: 50 }, { id: 'iron_ingot', name: '鉄インゴット', count: 10 }] },
-  { id: 'water_storage', name: '水貯蔵庫', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 100 }, { id: 'rope', name: '縄', count: 10 }] },
+  { id: 'furnace', name: 'かまど', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 400 }, { id: 'wood', name: '木材', count: 400 }, { id: 'clay', name: '粘土', count: 25 }] },
+  { id: 'cooking_station', name: '調理場', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 350 }, { id: 'stone', name: '石', count: 200 }, { id: 'iron_fragment', name: '鉄の破片', count: 100 }, { id: 'rope', name: '縄', count: 3 }] },
+  { id: 'workbench', name: '作業台', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 200 }, { id: 'stone', name: '石', count: 50 }, { id: 'rope', name: '縄', count: 3 }] },
+  { id: 'water_storage', name: '貯水場', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 150 }, { id: 'leaf', name: '葉', count: 25 }, { id: 'rope', name: '縄', count: 8 }] },
   { id: 'box', name: '箱', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 80 }] },
-  { id: 'shelf', name: '棚', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 120 }] },
-  { id: 'lock', name: '鍵', resultCount: 1, ingredients: [{ id: 'iron_ingot', name: '鉄インゴット', count: 5 }] },
-  { id: 'tribe_flag', name: '部族旗', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 30 }, { id: 'rope', name: '縄', count: 5 }] },
-  { id: 'spikes', name: '棘', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 40 }, { id: 'stone', name: '石', count: 20 }] },
+  { id: 'shelf', name: '棚', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 150 }] },
+  { id: 'lock', name: '鍵', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 75 }, { id: 'rope', name: '縄', count: 1 }] },
+  { id: 'tribe_flag', name: '部族旗', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 150 }, { id: 'rope', name: '縄', count: 5 }, { id: 'hide', name: '皮', count: 50 }] },
+  { id: 'spikes', name: '棘', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 200 }, { id: 'rope', name: '縄', count: 10 }] },
   { id: 'trap', name: '罠', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 30 }, { id: 'rope', name: '縄', count: 5 }] },
   { id: 'boat', name: 'ボート', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 300 }, { id: 'rope', name: '縄', count: 20 }] },
 ];
@@ -677,20 +717,73 @@ let draggedIndex: number | null = null;
 function getIngredientCount(id: string): number {
   return inventoryData.reduce((total, item) => (item && item.id === id ? total + item.count : total), 0);
 }
-function canCraft(recipe: Recipe): boolean {
-  return recipe.ingredients.every((ing) => getIngredientCount(ing.id) >= ing.count);
+
+const MAX_RESOURCE_STACK = 1000;
+
+function isStackable(id: string): boolean {
+  return !weaponStats[id] && !buildableIds.has(id);
 }
-function addItemToInventory(id: string, name: string, count: number): boolean {
-  for (const item of inventoryData) {
-    if (item && item.id === id) { item.count += count; return true; }
+
+function canAddItemToInventory(id: string, amount = 1): boolean {
+  if (amount <= 0) return true;
+  if (!isStackable(id)) {
+    return inventoryData.some((slot) => slot === null);
   }
+
+  let remaining = amount;
+  for (const item of inventoryData) {
+    if (item?.id === id) remaining -= Math.max(0, MAX_RESOURCE_STACK - item.count);
+    if (remaining <= 0) return true;
+  }
+
+  const emptySlots = inventoryData.filter((slot) => slot === null).length;
+  return remaining <= emptySlots * MAX_RESOURCE_STACK;
+}
+
+function canCraft(recipe: Recipe): boolean {
+  return canAddItemToInventory(recipe.id, recipe.resultCount)
+    && recipe.ingredients.every((ing) => getIngredientCount(ing.id) >= ing.count);
+}
+
+function addItemToInventory(id: string, name: string, count: number): boolean {
+  if (count <= 0) return true;
+  if (!canAddItemToInventory(id, count)) return false;
+
+  if (isStackable(id)) {
+    let remaining = count;
+    for (const item of inventoryData) {
+      if (!item || item.id !== id) continue;
+      const space = MAX_RESOURCE_STACK - item.count;
+      const moved = Math.min(space, remaining);
+      item.count += moved;
+      remaining -= moved;
+      if (remaining <= 0) return true;
+    }
+
+    while (remaining > 0) {
+      const emptyIndex = inventoryData.findIndex((slot) => slot === null);
+      if (emptyIndex === -1) return false;
+      const moved = Math.min(MAX_RESOURCE_STACK, remaining);
+      inventoryData[emptyIndex] = { id, name, count: moved };
+      remaining -= moved;
+    }
+    return true;
+  }
+
   const shouldPreferHotbar = !!weaponStats[id] || buildableIds.has(id);
   if (shouldPreferHotbar) {
     const hotbarEmpty = inventoryData.findIndex((slot, index) => index >= 10 && slot === null);
-    if (hotbarEmpty !== -1) { inventoryData[hotbarEmpty] = { id, name, count }; return true; }
+    if (hotbarEmpty !== -1) {
+      inventoryData[hotbarEmpty] = { id, name, count: 1 };
+      return true;
+    }
   }
+
   const emptyIndex = inventoryData.findIndex((slot) => slot === null);
-  if (emptyIndex !== -1) { inventoryData[emptyIndex] = { id, name, count }; return true; }
+  if (emptyIndex !== -1) {
+    inventoryData[emptyIndex] = { id, name, count: 1 };
+    return true;
+  }
   return false;
 }
 function consumeIngredients(ingredients: Ingredient[]) {
@@ -709,7 +802,12 @@ function consumeIngredients(ingredients: Ingredient[]) {
 function craftItem(recipe: Recipe) {
   if (!canCraft(recipe)) return;
   consumeIngredients(recipe.ingredients);
-  addItemToInventory(recipe.id, recipe.name, recipe.resultCount);
+  if (!addItemToInventory(recipe.id, recipe.name, recipe.resultCount)) {
+    // 容量判定は事前に行っているため通常ここには来ない。
+    // 万一失敗した場合でも素材を失わないようにするにはトランザクション化が必要だが、
+    // 現状は canCraft と同じ同期状態なので失敗しない。
+    return;
+  }
   renderUI();
 }
 
@@ -828,7 +926,7 @@ function drawMap() {
   const h = mapCanvas.height;
   mapCtx.clearRect(0, 0, w, h);
 
-  const worldRange = 1000;
+  const worldRange = 1050; // 主要5島＋海域を収める表示範囲
   const scale = Math.min(w, h) / (worldRange * 2);
   const toMapX = (x: number) => w / 2 + x * scale;
   const toMapZ = (z: number) => h / 2 + z * scale;
@@ -878,32 +976,42 @@ function getSelectedWeapon(): WeaponStats | null {
   return weaponStats[item.id] ?? null;
 }
 
-function getAimedResourceNode(): ResourceNode | null {
-  const raycaster = new THREE.Raycaster();
-  const center = new THREE.Vector2(0, 0);
-  raycaster.setFromCamera(center, camera);
+let resourceHitObjects: THREE.Object3D[] = [];
+let lastAimCheckAt = 0;
+let cachedAimedResource: ResourceNode | null = null;
 
-  const candidates: THREE.Object3D[] = [];
+function rebuildResourceHitObjects() {
+  resourceHitObjects = [];
   for (const node of resourceNodes) {
-    node.mesh.traverse((child) => candidates.push(child));
+    node.mesh.traverse((child) => resourceHitObjects.push(child));
   }
+}
 
-  const hits = raycaster.intersectObjects(candidates, false);
-  const maxDistance = 8;
+function getAimedResourceNode(force = false): ResourceNode | null {
+  const now = performance.now();
+  if (!force && now - lastAimCheckAt < 80) return cachedAimedResource;
+  lastAimCheckAt = now;
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  raycaster.far = 8;
+
+  const hits = raycaster.intersectObjects(resourceHitObjects, false);
+  cachedAimedResource = null;
+
   for (const hit of hits) {
-    if (hit.distance > maxDistance) break;
-    let object: THREE.Object3D | null = hit.object;
-    while (object) {
-      const node = resourceNodes.find((candidate) => candidate.mesh === object);
-      if (node) return node;
-      object = object.parent;
+    const node = hit.object.userData.resourceNode as ResourceNode | undefined;
+    if (node) {
+      cachedAimedResource = node;
+      break;
     }
   }
-  return null;
+
+  return cachedAimedResource;
 }
 
 function checkInteractions() {
-  if (isBuildMode) return;
+  if (isBuildMode || isSwimming) return;
   nearestNode = getAimedResourceNode();
 
   const weapon = getSelectedWeapon();
@@ -929,7 +1037,20 @@ function checkInteractions() {
 const ATTACK_COOLDOWN_MS = 1000;
 let lastAttackAt = -Infinity;
 
+function disposeObject3D(object: THREE.Object3D) {
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.geometry) mesh.geometry.dispose();
+
+    const material = mesh.material;
+    if (Array.isArray(material)) material.forEach((m) => m.dispose());
+    else if (material) material.dispose();
+  });
+}
+
 function attackNearestNode() {
+  if (isSwimming || isInventoryOpen || isMapOpen) return;
+
   const now = performance.now();
   if (now - lastAttackAt < ATTACK_COOLDOWN_MS) return;
 
@@ -940,24 +1061,37 @@ function attackNearestNode() {
   if (!weapon) return;
 
   const damage = weapon.vsResource;
-  if (!addItemToInventory(nearestNode.itemId, nearestNode.itemName, nearestNode.yieldCount > 0
-    ? Math.max(1, Math.ceil(damage * 0.8) + Math.floor(Math.random() * Math.max(1, Math.floor(damage * 0.7))))
-    : 1)) {
+
+  // 資源は「壊した瞬間」にだけ獲得する。
+  // 最後の一撃でインベントリが満杯になる場合は、耐久を減らさない。
+  if (nearestNode.health - damage <= 0 && !canAddItemToInventory(nearestNode.itemId, nearestNode.yieldCount)) {
     interactPrompt.style.display = 'block';
     interactPrompt.innerText = 'インベントリが満杯です。空きを作ってください';
     return;
   }
 
   lastAttackAt = now;
+  nearestNode.health -= damage;
+
   if (nearestNode.resourceType === 'tree') spawnWoodHitEffect(nearestNode);
   playAttackEffect(nearestNode.mesh);
   showDamageNumber(nearestNode.mesh, damage);
-  nearestNode.health -= damage;
 
   if (nearestNode.health <= 0) {
+    if (!addItemToInventory(nearestNode.itemId, nearestNode.itemName, nearestNode.yieldCount)) {
+      // 上の容量チェックと同一フレームなので通常は発生しない。
+      nearestNode.health = 1;
+      return;
+    }
+
     scene.remove(nearestNode.mesh);
+    disposeObject3D(nearestNode.mesh);
+
     const index = resourceNodes.indexOf(nearestNode);
     if (index !== -1) resourceNodes.splice(index, 1);
+    rebuildResourceHitObjects();
+    cachedAimedResource = null;
+
     nearestNode = null;
     interactPrompt.style.display = 'none';
     renderUI();
@@ -968,24 +1102,118 @@ function attackNearestNode() {
   checkInteractions();
 }
 
-
 function resolveObjectCollisions(newX: number, newZ: number): { x: number; z: number } {
   const playerRadius = 0.5;
   let resolvedX = newX;
   let resolvedZ = newZ;
+
+  // 資源との衝突
   for (const node of resourceNodes) {
     if (node.resourceType === 'pickup') continue;
     const dx = resolvedX - node.mesh.position.x;
     const dz = resolvedZ - node.mesh.position.z;
-    const dist = Math.hypot(dx, dz);
+    const distSq = dx * dx + dz * dz;
     const minDist = playerRadius + node.radius;
-    if (dist < minDist && dist > 0) {
+    if (distSq < minDist * minDist && distSq > 0.000001) {
+      const dist = Math.sqrt(distSq);
       const overlap = minDist - dist;
       resolvedX += (dx / dist) * overlap;
       resolvedZ += (dz / dist) * overlap;
     }
   }
+
+  // 建築物との衝突。床・天井は上下方向の判定で処理するため、ここでは通行を妨げない。
+  for (const building of placedBuildings) {
+    if (building.id.includes('floor') || building.id === 'wooden_ceiling') continue;
+
+    const { halfX, halfZ } = getBuildingHorizontalHalfExtents(building);
+    const dxWorld = resolvedX - building.mesh.position.x;
+    const dzWorld = resolvedZ - building.mesh.position.z;
+    const cos = Math.cos(building.mesh.rotation.y);
+    const sin = Math.sin(building.mesh.rotation.y);
+    const localX = dxWorld * cos + dzWorld * sin;
+    const localZ = -dxWorld * sin + dzWorld * cos;
+    const closestX = Math.max(-halfX, Math.min(halfX, localX));
+    const closestZ = Math.max(-halfZ, Math.min(halfZ, localZ));
+    const pushX = localX - closestX;
+    const pushZ = localZ - closestZ;
+    const distSq = pushX * pushX + pushZ * pushZ;
+
+    if (distSq < playerRadius * playerRadius) {
+      if (distSq > 0.000001) {
+        const dist = Math.sqrt(distSq);
+        const push = playerRadius - dist;
+        const normalX = pushX / dist;
+        const normalZ = pushZ / dist;
+        const worldNX = normalX * cos - normalZ * sin;
+        const worldNZ = normalX * sin + normalZ * cos;
+        resolvedX += worldNX * push;
+        resolvedZ += worldNZ * push;
+      } else {
+        // プレイヤーが完全に内部に入った場合は最も近い面の外側へ押し出す。
+        const toX = halfX - Math.abs(localX);
+        const toZ = halfZ - Math.abs(localZ);
+        if (toX < toZ) {
+          const dir = localX >= 0 ? 1 : -1;
+          const worldNX = dir * cos;
+          const worldNZ = dir * sin;
+          resolvedX += worldNX * (toX + playerRadius);
+          resolvedZ += worldNZ * (toX + playerRadius);
+        } else {
+          const dir = localZ >= 0 ? 1 : -1;
+          const worldNX = -dir * sin;
+          const worldNZ = dir * cos;
+          resolvedX += worldNX * (toZ + playerRadius);
+          resolvedZ += worldNZ * (toZ + playerRadius);
+        }
+      }
+    }
+  }
+
   return { x: resolvedX, z: resolvedZ };
+}
+
+function getBuildingHorizontalHalfExtents(building: PlacedBuilding): { halfX: number; halfZ: number } {
+  const id = building.id;
+  if (id.includes('wall')) return { halfX: 2, halfZ: 0.12 };
+  if (id.includes('floor') || id === 'wooden_ceiling') return { halfX: 2, halfZ: 2 };
+  return { halfX: 1, halfZ: 1 };
+}
+
+function getBuildingFloorHeight(x: number, z: number, currentY: number): number {
+  let highest = currentY;
+  for (const building of placedBuildings) {
+    if (!building.id.includes('floor')) continue;
+    const dx = x - building.mesh.position.x;
+    const dz = z - building.mesh.position.z;
+    const cos = Math.cos(building.mesh.rotation.y);
+    const sin = Math.sin(building.mesh.rotation.y);
+    const localX = dx * cos + dz * sin;
+    const localZ = -dx * sin + dz * cos;
+    if (Math.abs(localX) <= 2 && Math.abs(localZ) <= 2) {
+      const top = building.mesh.position.y + 0.25;
+      if (top > highest) highest = top;
+    }
+  }
+  return highest;
+}
+
+function getBuildingCeilingBottom(x: number, z: number): number | null {
+  let lowest: number | null = null;
+  for (const building of placedBuildings) {
+    if (building.id !== 'wooden_ceiling') continue;
+    const dx = x - building.mesh.position.x;
+    const dz = z - building.mesh.position.z;
+    const cos = Math.cos(building.mesh.rotation.y);
+    const sin = Math.sin(building.mesh.rotation.y);
+    const localX = dx * cos + dz * sin;
+    const localZ = -dx * sin + dz * cos;
+    if (Math.abs(localX) <= 2 && Math.abs(localZ) <= 2) {
+      const bottom = building.mesh.position.y - 0.125;
+      if (lowest === null || bottom < lowest) lowest = bottom;
+    }
+  }
+  return lowest;
 }
 
 // --- 建築 ---
@@ -999,10 +1227,9 @@ let isBuildMode = false;
 let buildRotation = 0;
 let buildPreview: THREE.Mesh | null = null;
 
-const buildableIds = new Set(['wooden_floor', 'wooden_wall', 'wooden_ceiling', 'stone_floor', 'stone_wall', 'iron_floor', 'iron_wall', 'campfire', 'furnace', 'cooking_station', 'workbench', 'water_storage', 'box', 'shelf', 'lock', 'tribe_flag', 'spikes', 'trap']);
+const buildableIds = new Set(['wooden_floor', 'wooden_wall', 'wooden_ceiling', 'stone_floor', 'stone_wall', 'iron_floor', 'iron_wall', 'campfire', 'furnace', 'cooking_station', 'workbench', 'water_storage', 'box', 'shelf', 'lock', 'tribe_flag', 'spikes', 'trap', 'boat']);
 
-// 初期UI描画は建築モードの状態が初期化された後に行う
-renderUI();
+// 初期UI描画は全ての依存関係を初期化した後に行う
 
 function isBuildableSelected(): boolean {
   const item = getSelectedHotbarItem();
@@ -1014,9 +1241,11 @@ function createBuildingMesh(id: string): THREE.Mesh {
   let material: THREE.Material;
 
   if (id.includes('wall')) {
-    geometry = new THREE.BoxGeometry(4, 3, 0.35);
+    // 壁は十分な高さを確保しつつ、厚さは薄めにする。
+    geometry = new THREE.BoxGeometry(4, 4.5, 0.24);
   } else if (id.includes('floor') || id === 'wooden_ceiling') {
-    geometry = new THREE.BoxGeometry(4, 0.25, 4);
+    // 床は薄い板ではなく、しっかりした土台として使える厚みにする。
+    geometry = new THREE.BoxGeometry(4, 0.5, 4);
   } else {
     geometry = new THREE.BoxGeometry(2, 2, 2);
   }
@@ -1052,17 +1281,68 @@ function updateBuildPreview() {
   const snappedX = Math.round(pos.x / 2) * 2;
   const snappedZ = Math.round(pos.z / 2) * 2;
   const ground = getTerrainHeightAt(snappedX, snappedZ);
-  const isFlatPiece = item.id.includes('floor') || item.id === 'wooden_ceiling';
-  const y = isFlatPiece ? ground + 0.15 : ground + 1.5;
+  const support = getBuildingFloorHeight(snappedX, snappedZ, ground);
+  const isFloor = item.id.includes('floor');
+  const isCeiling = item.id === 'wooden_ceiling';
+  const isFlatPiece = isFloor || isCeiling;
+  const buildingHeight = item.id.includes('wall') ? 4.5 : (isFlatPiece ? 0.5 : 2);
+  const y = isFloor ? support + 0.25 : (isCeiling ? support + 3.0 : support + buildingHeight / 2);
   buildPreview.position.set(snappedX, y, snappedZ);
   buildPreview.rotation.y = buildRotation;
+
+  const valid = canPlaceSelectedBuilding();
+  (buildPreview.material as THREE.MeshLambertMaterial).opacity = valid ? 0.35 : 0.12;
+}
+
+function canPlaceSelectedBuilding(): boolean {
+  if (!buildPreview) return false;
+  const item = getSelectedHotbarItem();
+  if (!item || item.count <= 0) return false;
+
+  const isFloor = item.id.includes('floor');
+  const ground = getTerrainHeightAt(buildPreview.position.x, buildPreview.position.z);
+
+  // ボートだけは海上に置ける。その他の建築物は陸上限定。
+  if (item.id === 'boat') return ground <= SEA_LEVEL + 0.05;
+  if (ground <= SEA_LEVEL + 0.05) return false;
+
+  // 建築物の中心が既存建築物に重なるのを防ぐ。
+  const previewBox = new THREE.Box3().setFromObject(buildPreview);
+  for (const building of placedBuildings) {
+    const existingBox = new THREE.Box3().setFromObject(building.mesh);
+
+    const horizontalOverlap =
+      previewBox.min.x < existingBox.max.x - 0.05 &&
+      previewBox.max.x > existingBox.min.x + 0.05 &&
+      previewBox.min.z < existingBox.max.z - 0.05 &&
+      previewBox.max.z > existingBox.min.z + 0.05;
+
+    const verticalOverlap =
+      previewBox.min.y < existingBox.max.y - 0.05 &&
+      previewBox.max.y > existingBox.min.y + 0.05;
+
+    if (horizontalOverlap && verticalOverlap) return false;
+  }
+
+  // 床以外は地面に置く。既存の建築階層システムはそのまま維持する。
+  if (!isFloor && item.id !== 'wooden_ceiling') {
+    const expectedY = getBuildingFloorHeight(buildPreview.position.x, buildPreview.position.z, ground) + 1;
+    if (Math.abs(buildPreview.position.y - expectedY) > 4.0) return false;
+  }
+
+  return true;
 }
 
 function placeSelectedBuilding() {
   if (!isBuildMode || !isBuildableSelected()) return;
   const item = getSelectedHotbarItem()!;
-  if (!buildPreview) return;
-  if (item.count <= 0) return;
+  if (!buildPreview || item.count <= 0) return;
+
+  if (!canPlaceSelectedBuilding()) {
+    interactPrompt.style.display = 'block';
+    interactPrompt.innerText = 'ここには建築できません';
+    return;
+  }
 
   const mesh = createBuildingMesh(item.id);
   mesh.position.copy(buildPreview.position);
@@ -1098,10 +1378,15 @@ const thirdPersonDistance = 8;
 let isFirstPerson = false;
 
 let velocityY = 0;
-const gravity = -0.015;
-const jumpStrength = 0.35;
+const gravity = -18;
+const jumpStrength = 6;
 let isGrounded = true;
 let walkTime = 0;
+let swimTime = 0;
+let isSwimming = false;
+let jumpWasDown = false;
+const SWIM_LEVEL_OFFSET = 0.35;
+const SWIM_SPEED = 5.4;
 
 window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
@@ -1115,15 +1400,21 @@ window.addEventListener('keydown', (e) => {
       scene.remove(aimed.mesh);
       const index = resourceNodes.indexOf(aimed);
       if (index !== -1) resourceNodes.splice(index, 1);
+      disposeObject3D(aimed.mesh);
+      rebuildResourceHitObjects();
+      cachedAimedResource = null;
       nearestNode = null;
       renderUI();
       return;
     }
   }
 
-  if (['1', '2', '3', '4', '5'].includes(key)) { activeHotbarIndex = parseInt(key) - 1; renderUI(); }
+  if (!isInventoryOpen && !isMapOpen && ['1', '2', '3', '4', '5'].includes(key)) {
+    activeHotbarIndex = parseInt(key) - 1;
+    renderUI();
+  }
 
-  if (key === 'y' && !keys['y']) {
+  if (!isInventoryOpen && !isMapOpen && key === 'y' && !keys['y']) {
     isFirstPerson = !isFirstPerson;
     viewModeText.innerText = isFirstPerson ? '一人称' : '三人称';
   }
@@ -1131,7 +1422,11 @@ window.addEventListener('keydown', (e) => {
   keys[key] = true;
 });
 
-window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+window.addEventListener('keyup', (e) => {
+  const key = e.key.toLowerCase();
+  keys[key] = false;
+  if (key === ' ') jumpWasDown = false;
+});
 
 let isAttackHeld = false;
 let attackInterval: number | null = null;
@@ -1180,7 +1475,11 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('mouseup', (e) => {
   if (e.button === 0) stopAttackHold();
 });
-window.addEventListener('blur', stopAttackHold);
+window.addEventListener('blur', () => {
+  stopAttackHold();
+  for (const key of Object.keys(keys)) keys[key] = false;
+  jumpWasDown = false;
+});
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 
 window.addEventListener('mousemove', (e) => {
@@ -1201,23 +1500,102 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 });
+
+// 水しぶき：泳いでいることが視覚的に分かるように小さな粒を出す。
+let lastSplashAt = 0;
+const splashGeometry = new THREE.SphereGeometry(0.09, 5, 3);
+const splashMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 });
+function spawnSwimSplash() {
+  const now = performance.now();
+  if (now - lastSplashAt < 300) return;
+  lastSplashAt = now;
+
+  const splash = new THREE.Mesh(splashGeometry, splashMaterial.clone());
+  splash.position.set(
+    playerGroup.position.x + (Math.random() - 0.5) * 0.8,
+    SEA_LEVEL + 0.04,
+    playerGroup.position.z + (Math.random() - 0.5) * 0.8
+  );
+  scene.add(splash);
+
+  const born = now;
+  const life = 0.28;
+  const tick = () => {
+    const progress = (performance.now() - born) / 1000;
+    splash.position.y = SEA_LEVEL + 0.04 + progress * 0.5;
+    splash.scale.setScalar(1 + progress * 1.2);
+    (splash.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.7 - progress * 2.2);
+    if (progress < life) requestAnimationFrame(tick);
+    else {
+      scene.remove(splash);
+      (splash.material as THREE.Material).dispose();
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+function getSafeThirdPersonCameraPosition(desired: THREE.Vector3): THREE.Vector3 {
+  const origin = playerGroup.position.clone();
+  origin.y += 1.2;
+  const direction = desired.clone().sub(origin);
+  const distance = direction.length();
+  if (distance <= 0.001) return desired;
+  direction.normalize();
+
+  const raycaster = new THREE.Raycaster(origin, direction, 0.1, distance);
+  const hits = raycaster.intersectObjects(placedBuildings.map((b) => b.mesh), false);
+  if (hits.length > 0) {
+    const safeDistance = Math.max(1.0, hits[0].distance - 0.35);
+    return origin.clone().add(direction.multiplyScalar(safeDistance));
+  }
+  return desired;
+}
 
 // 7. メインループ
 let lastTime = performance.now();
+
+let isDead = false;
+
+function respawnPlayer() {
+  hp = 100;
+  thirst = 100;
+  hunger = 100;
+  playerGroup.position.set(0, getTerrainHeightAt(0, 0), 0);
+  velocityY = 0;
+  isGrounded = true;
+  isSwimming = false;
+  isDead = false;
+  interactPrompt.style.display = 'none';
+  updateUI();
+}
 
 function animate() {
   requestAnimationFrame(animate);
 
   const now = performance.now();
-  const delta = (now - lastTime) / 1000;
+  const delta = Math.min((now - lastTime) / 1000, 0.05);
   lastTime = now;
 
   const paused = isInventoryOpen || isMapOpen;
 
   if (!paused) {
     const isSprinting = keys['shift'];
-    const speed = isSprinting ? 0.3 : 0.15;
+    const inWater = getCurrentIslandName(playerGroup.position.x, playerGroup.position.z) === '海の上';
+    const speed = inWater ? SWIM_SPEED : (isSprinting ? 18 : 9);
+
+    if (inWater !== isSwimming) {
+      isSwimming = inWater;
+      velocityY = 0;
+      isGrounded = !isSwimming;
+      if (isSwimming) {
+        swimTime = 0;
+        leftLegGroup.rotation.x = 0;
+        rightLegGroup.rotation.x = 0;
+        interactPrompt.style.display = 'none';
+      }
+    }
 
     thirst -= 0.5 * delta;
     hunger -= 0.3 * delta;
@@ -1226,6 +1604,12 @@ function animate() {
     hp = Math.max(0, Math.min(100, hp));
     thirst = Math.max(0, Math.min(100, thirst));
     hunger = Math.max(0, Math.min(100, hunger));
+
+    if (hp <= 0 && !isDead) {
+      isDead = true;
+      stopAttackHold();
+      respawnPlayer();
+    }
 
     updateUI();
     islandNameUI.innerText = getCurrentIslandName(playerGroup.position.x, playerGroup.position.z);
@@ -1243,15 +1627,23 @@ function animate() {
     if (keys['d'] || keys['arrowright']) { moveX += rightX; moveZ += rightZ; }
 
     const isMoving = moveX !== 0 || moveZ !== 0;
+    if (isSwimming && isMoving) spawnSwimSplash();
 
     if (isMoving) {
       const len = Math.hypot(moveX, moveZ);
-      const targetX = playerGroup.position.x + (moveX / len) * speed;
-      const targetZ = playerGroup.position.z + (moveZ / len) * speed;
+      const targetX = playerGroup.position.x + (moveX / len) * speed * delta;
+      const targetZ = playerGroup.position.z + (moveZ / len) * speed * delta;
 
-      const resolved = resolveObjectCollisions(targetX, targetZ);
-      playerGroup.position.x = resolved.x;
-      playerGroup.position.z = resolved.z;
+      const targetGroundHeight = getTerrainHeightAt(targetX, targetZ);
+      if (targetGroundHeight <= SEA_LEVEL + 0.05) {
+        // 海は歩けないが、泳いで進める。水中では資源との衝突も無効にする。
+        playerGroup.position.x = targetX;
+        playerGroup.position.z = targetZ;
+      } else {
+        const resolved = resolveObjectCollisions(targetX, targetZ);
+        playerGroup.position.x = resolved.x;
+        playerGroup.position.z = resolved.z;
+      }
 
       if (!isFirstPerson) {
         playerGroup.rotation.y = Math.atan2(-moveX, -moveZ);
@@ -1272,16 +1664,47 @@ function animate() {
       if (isFirstPerson) playerGroup.rotation.y = cameraYaw;
     }
 
-    if (keys[' '] && isGrounded) { velocityY = jumpStrength; isGrounded = false; }
+    if (!isSwimming) {
+      // 陸上のジャンプだけを許可。高さは元の jumpStrength を維持する。
+      const jumpPressed = keys[' '] && !jumpWasDown;
+      if (jumpPressed && isGrounded) { velocityY = jumpStrength; isGrounded = false; }
+      jumpWasDown = keys[' '];
 
-    velocityY += gravity;
-    playerGroup.position.y += velocityY;
+      velocityY += gravity * delta;
+      playerGroup.position.y += velocityY * delta;
 
-    const groundHeight = getTerrainHeightAt(playerGroup.position.x, playerGroup.position.z);
-    if (playerGroup.position.y <= groundHeight) {
-      playerGroup.position.y = groundHeight;
+      const groundHeight = getTerrainHeightAt(playerGroup.position.x, playerGroup.position.z);
+      const floorHeight = getBuildingFloorHeight(playerGroup.position.x, playerGroup.position.z, groundHeight);
+      const supportHeight = Math.max(groundHeight, floorHeight);
+      const ceilingBottom = getBuildingCeilingBottom(playerGroup.position.x, playerGroup.position.z);
+
+      if (playerGroup.position.y <= supportHeight) {
+        playerGroup.position.y = supportHeight;
+        velocityY = 0;
+        isGrounded = true;
+      } else if (ceilingBottom !== null && velocityY > 0 && playerGroup.position.y + 2 >= ceilingBottom) {
+        playerGroup.position.y = ceilingBottom - 2;
+        velocityY = 0;
+      }
+    } else {
+      // 水面付近を泳ぐ。上下に小さく揺らして水泳中であることを表現する。
+      swimTime += delta * 4.5;
+      const swimBaseY = SEA_LEVEL - SWIM_LEVEL_OFFSET;
+      playerGroup.position.y = swimBaseY + Math.sin(swimTime) * 0.12;
       velocityY = 0;
-      isGrounded = true;
+      isGrounded = false;
+      const swimming = isMoving;
+      if (swimming) {
+        leftArmGroup.rotation.x = Math.sin(swimTime * 1.8) * 0.8;
+        rightArmGroup.rotation.x = -Math.sin(swimTime * 1.8) * 0.8;
+        leftLegGroup.rotation.x = -Math.sin(swimTime * 1.8) * 0.35;
+        rightLegGroup.rotation.x = Math.sin(swimTime * 1.8) * 0.35;
+      } else {
+        leftArmGroup.rotation.x = 0.15;
+        rightArmGroup.rotation.x = -0.15;
+        leftLegGroup.rotation.x = 0;
+        rightLegGroup.rotation.x = 0;
+      }
     }
 
     checkInteractions();
@@ -1315,8 +1738,8 @@ function animate() {
   for (let i = harvestEffectParticles.length - 1; i >= 0; i--) {
     const particle = harvestEffectParticles[i];
     particle.life -= delta;
-    particle.velocity.y -= 0.004;
-    particle.mesh.position.add(particle.velocity);
+    particle.velocity.y -= 0.012 * delta;
+    particle.mesh.position.addScaledVector(particle.velocity, delta * 60);
     particle.mesh.rotation.x += 0.15;
     particle.mesh.rotation.y += 0.12;
 
@@ -1345,13 +1768,26 @@ function animate() {
     camera.lookAt(lookTarget);
   } else {
     playerGroup.visible = true;
-    camera.position.x = playerGroup.position.x + thirdPersonDistance * Math.sin(cameraYaw) * Math.cos(cameraPitch);
-    camera.position.y = playerGroup.position.y + 1.2 + thirdPersonDistance * Math.sin(cameraPitch);
-    camera.position.z = playerGroup.position.z + thirdPersonDistance * Math.cos(cameraYaw) * Math.cos(cameraPitch);
+    const desiredCamera = new THREE.Vector3(
+      playerGroup.position.x + thirdPersonDistance * Math.sin(cameraYaw) * Math.cos(cameraPitch),
+      playerGroup.position.y + 1.2 + thirdPersonDistance * Math.sin(cameraPitch),
+      playerGroup.position.z + thirdPersonDistance * Math.cos(cameraYaw) * Math.cos(cameraPitch)
+    );
+    const safeCamera = getSafeThirdPersonCameraPosition(desiredCamera);
+    camera.position.copy(safeCamera);
     camera.lookAt(playerGroup.position.x, playerGroup.position.y + 1.2, playerGroup.position.z);
   }
 
   renderer.render(scene, camera);
 }
 
-animate();
+function initializeGame() {
+  // すべての変数・関数・定数が初期化された後にゲーム状態を構築する。
+  spawnAllIslandResources();
+  rebuildResourceHitObjects();
+  updateUI();
+  renderUI();
+  animate();
+}
+
+initializeGame();

@@ -1,76 +1,35 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>3D戦略型領地島支配ゲーム</title>
   <style>
     body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
     canvas { display: block; }
-
-    #ui-container {
-      position: absolute; bottom: 20px; right: 20px; width: 220px;
-      display: flex; flex-direction: column; gap: 10px; pointer-events: none;
-    }
+    #ui-container { position: absolute; bottom: 20px; right: 20px; width: 220px; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
     .status-bar-container { background: rgba(0,0,0,0.6); padding: 6px 10px; border-radius: 6px; color: white; font-size: 12px; font-weight: bold; }
     .bar-bg { width: 100%; height: 12px; background: #444; border-radius: 4px; overflow: hidden; margin-top: 4px; }
     .bar-fill { height: 100%; width: 100%; transition: width 0.1s ease; }
     #hp-bar { background: #e74c3c; }
-    #thirst-bar { background: #3498db; }
+    #thirst-val-bar { background: #3498db; }
     #hunger-bar { background: #f39c12; }
-
-    #location-ui {
-      position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.7); color: white;
-      padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: bold;
-      border: 1px solid rgba(255,255,255,0.2); pointer-events: none;
-    }
-
-    #view-mode-ui {
-      position: absolute; top: 20px; right: 20px; background: rgba(0,0,0,0.7); color: white;
-      padding: 8px 14px; border-radius: 8px; font-size: 12px; pointer-events: none;
-    }
-
-    #hotbar-container {
-      position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
-      display: flex; gap: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 10px;
-      border: 1px solid rgba(255,255,255,0.2); pointer-events: none;
-    }
-    .hotbar-slot {
-      width: 60px; height: 60px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3);
-      border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      color: white; font-size: 11px; font-weight: bold; position: relative; text-align: center; padding: 2px; box-sizing: border-box;
-    }
+    #location-ui { position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.7); color: white; padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2); pointer-events: none; }
+    #view-mode-ui { position: absolute; top: 20px; right: 20px; background: rgba(0,0,0,0.7); color: white; padding: 8px 14px; border-radius: 8px; font-size: 12px; pointer-events: none; }
+    #hotbar-container { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); pointer-events: none; }
+    .hotbar-slot { width: 60px; height: 60px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: white; font-size: 11px; font-weight: bold; position: relative; text-align: center; padding: 2px; box-sizing: border-box; }
     .hotbar-slot.active { border-color: #f1c40f; background: rgba(241,196,15,0.2); box-shadow: 0 0 10px rgba(241,196,15,0.5); }
     .hotbar-key { position: absolute; top: 3px; left: 5px; font-size: 10px; color: #aaa; }
-
-    #interact-prompt {
-      position: absolute; top: 60%; left: 50%; transform: translate(-50%, -50%);
-      background: rgba(0,0,0,0.75); border: 1px solid rgba(255,255,255,0.4); color: #fff;
-      padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold;
-      pointer-events: none; display: none; box-shadow: 0 0 10px rgba(0,0,0,0.5);
-    }
-
-    #inventory-modal {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      width: 950px; height: 580px; background: rgba(15,15,18,0.95); border: 2px solid #555;
-      border-radius: 12px; padding: 28px; color: white; display: none;
-      box-shadow: 0 0 30px rgba(0,0,0,0.85); box-sizing: border-box; z-index: 10;
-    }
+    #interact-prompt { position: absolute; top: 60%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.75); border: 1px solid rgba(255,255,255,0.4); color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; pointer-events: none; display: none; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+    #inventory-modal { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(950px, 92vw); height: min(580px, 86vh); background: rgba(15,15,18,0.95); border: 2px solid #555; border-radius: 12px; padding: 28px; color: white; display: none; box-shadow: 0 0 30px rgba(0,0,0,0.85); box-sizing: border-box; z-index: 10; }
     #inventory-modal.active { display: flex; gap: 28px; }
-
     .panel { flex: 1; display: flex; flex-direction: column; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 20px; min-width: 0; }
     .panel-title { font-size: 18px; font-weight: bold; letter-spacing: 1px; margin-bottom: 16px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 12px; color: #f0f0f0; }
-
     .inventory-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
-    .inventory-slot {
-      aspect-ratio: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2);
-      border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 12px;
-      font-weight: bold; text-align: center; color: #eee; transition: border-color 0.2s, background-color 0.2s;
-      cursor: grab; position: relative; padding: 4px; box-sizing: border-box; word-break: break-word;
-    }
+    .inventory-slot { aspect-ratio: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; text-align: center; color: #eee; transition: border-color 0.2s, background-color 0.2s; cursor: grab; position: relative; padding: 4px; box-sizing: border-box; word-break: break-word; white-space: pre-line; }
     .inventory-slot:hover { border-color: #3498db; background: rgba(52,152,219,0.2); }
     .inventory-slot.drag-over { border-color: #2ecc71; background: rgba(46,204,113,0.3); }
     .inventory-slot.hotbar-linked { border-bottom: 3px solid #f1c40f; }
-
     .craft-list { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; padding-right: 6px; max-height: 440px; }
     .craft-list::-webkit-scrollbar { width: 6px; }
     .craft-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
@@ -81,31 +40,22 @@
     .craft-btn { background: #27ae60; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; transition: background 0.2s, opacity 0.2s; white-space: nowrap; }
     .craft-btn:hover:not(:disabled) { background: #2ecc71; }
     .craft-btn:disabled { background: #555; color: #888; cursor: not-allowed; opacity: 0.6; }
-
-    #map-modal {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      width: 700px; height: 700px; background: rgba(10,10,14,0.95); border: 2px solid #555;
-      border-radius: 12px; padding: 16px; box-sizing: border-box; display: none; z-index: 10;
-      box-shadow: 0 0 30px rgba(0,0,0,0.85);
-    }
+    #map-modal { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(700px, 92vw); height: min(700px, 92vh); background: rgba(10,10,14,0.95); border: 2px solid #555; border-radius: 12px; padding: 16px; box-sizing: border-box; display: none; z-index: 10; box-shadow: 0 0 30px rgba(0,0,0,0.85); }
     #map-modal.active { display: block; }
     #map-title { color: #fff; text-align: center; font-weight: bold; margin-bottom: 8px; letter-spacing: 1px; }
-    #map-canvas { display: block; background: #0d3b66; border-radius: 8px; }
+    #map-canvas { display: block; width: 100%; height: calc(100% - 32px); background: #0d3b66; border-radius: 8px; }
   </style>
 </head>
 <body>
   <div id="location-ui">現在地: <span id="island-name">グリーンアイランド</span></div>
   <div id="view-mode-ui">視点: <span id="view-mode-text">三人称</span> (Yで切替) / Mでマップ</div>
-
   <div id="ui-container">
     <div class="status-bar-container">HEALTH: <span id="hp-val">100</span> / 100<div class="bar-bg"><div id="hp-bar" class="bar-fill"></div></div></div>
     <div class="status-bar-container">WATER: <span id="thirst-val">100</span> / 100<div class="bar-bg"><div id="thirst-val-bar" class="bar-fill"></div></div></div>
     <div class="status-bar-container">FOOD: <span id="hunger-val">100</span> / 100<div class="bar-bg"><div id="hunger-bar" class="bar-fill"></div></div></div>
   </div>
-
   <div id="hotbar-container"></div>
   <div id="interact-prompt">[左クリック] 採集する</div>
-
   <div id="inventory-modal">
     <div class="panel">
       <div class="panel-title">INVENTORY (15)</div>
@@ -116,12 +66,10 @@
       <div class="craft-list" id="craft-list"></div>
     </div>
   </div>
-
   <div id="map-modal">
     <div id="map-title">MAP (Mで閉じる)</div>
     <canvas id="map-canvas" width="668" height="640"></canvas>
   </div>
-
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
