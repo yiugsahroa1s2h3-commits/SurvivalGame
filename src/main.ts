@@ -1,3 +1,4 @@
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as THREE from 'three';
 
 // 1. シーン・カメラ・レンダラー
@@ -413,6 +414,12 @@ const weaponStats: Record<string, WeaponStats> = {
 
 const resourceNodes: ResourceNode[] = [];
 
+// Blenderで作成した木モデル（public/wood1.glb）を共有して使う。
+// すべての木で同じジオメトリを共有することで、木が大量にあっても無駄な読み込みを避ける。
+const gltfLoader = new GLTFLoader();
+let woodModelTemplate: THREE.Group | null = null;
+let rockModelTemplate: THREE.Group | null = null;
+
 const treeDurability: Record<ResourceNode['resourceSize'], number> = {
   small: 50,
   normal: 100,
@@ -451,24 +458,39 @@ function createTreeResource(
   z: number,
   size: ResourceNode['resourceSize']
 ): ResourceNode {
-  const scale = size === 'small' ? 0.7 : size === 'large' ? 1.35 : 1.0;
-  const group = new THREE.Group();
+  // wood1.glbが読み込まれていればBlender製モデルを使用する。
+  // 念のため、モデルが存在しない場合は従来の簡易モデルを使う。
+  const sizeScale = size === 'small' ? 0.7 : size === 'large' ? 1.35 : 1.0;
+  let group: THREE.Group;
 
-  const trunk = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.65 * scale, 0.85 * scale, 8 * scale, 8),
-    new THREE.MeshLambertMaterial({ color: 0x8b4513 })
-  );
-  trunk.position.y = 4 * scale;
-  group.add(trunk);
+  if (woodModelTemplate) {
+    group = woodModelTemplate.clone(true);
+    group.scale.multiplyScalar(sizeScale);
 
-  const leaves = new THREE.Mesh(
-    new THREE.ConeGeometry(3.5 * scale, 7.5 * scale, 10),
-    new THREE.MeshLambertMaterial({ color: 0x228b22 })
-  );
-  leaves.position.y = 9 * scale;
-  group.add(leaves);
+    // Blender側の原点が木の根元からずれていても、地面に接するように補正する。
+    const box = new THREE.Box3().setFromObject(group);
+    const minY = box.min.y;
+    group.position.set(x, groundY - minY, z);
+  } else {
+    group = new THREE.Group();
 
-  group.position.set(x, groundY, z);
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.65 * sizeScale, 0.85 * sizeScale, 8 * sizeScale, 8),
+      new THREE.MeshLambertMaterial({ color: 0x8b4513 })
+    );
+    trunk.position.y = 4 * sizeScale;
+    group.add(trunk);
+
+    const leaves = new THREE.Mesh(
+      new THREE.ConeGeometry(3.5 * sizeScale, 7.5 * sizeScale, 10),
+      new THREE.MeshLambertMaterial({ color: 0x228b22 })
+    );
+    leaves.position.y = 9 * sizeScale;
+    group.add(leaves);
+
+    group.position.set(x, groundY, z);
+  }
+
   scene.add(group);
 
   const health = treeDurability[size];
@@ -480,7 +502,7 @@ function createTreeResource(
     yieldCount: size === 'large' ? 10 : size === 'normal' ? 5 : 3,
     health,
     maxHealth: health,
-    radius: 0.8 * scale,
+    radius: 0.8 * sizeScale,
     resourceType: 'tree',
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
@@ -495,12 +517,28 @@ function createRockResource(
   z: number,
   size: ResourceNode['resourceSize']
 ): ResourceNode {
-  const scale = size === 'small' ? 0.65 : size === 'large' ? 1.45 : 1.0;
-  const mesh = new THREE.Mesh(
-    new THREE.DodecahedronGeometry(1.2 * scale, 1),
-    new THREE.MeshLambertMaterial({ color: 0x708090 })
-  );
-  mesh.position.set(x, groundY + 0.6 * scale, z);
+  const sizeScale = size === 'small' ? 0.65 : size === 'large' ? 1.45 : 1.0;
+  let mesh: THREE.Group | THREE.Mesh;
+
+  if (rockModelTemplate) {
+    const group = rockModelTemplate.clone(true);
+    group.scale.multiplyScalar(sizeScale);
+
+    // rock1.glbの原点が岩の中心などになっていても、岩の底面が地面に接するように補正する。
+    const box = new THREE.Box3().setFromObject(group);
+    const minY = box.min.y;
+    group.position.set(x, groundY - minY, z);
+    mesh = group;
+  } else {
+    // rock1.glbが読み込めなかった場合の従来モデル。
+    const fallback = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(1.2 * sizeScale, 1),
+      new THREE.MeshLambertMaterial({ color: 0x708090 })
+    );
+    fallback.position.set(x, groundY + 0.6 * sizeScale, z);
+    mesh = fallback;
+  }
+
   scene.add(mesh);
 
   const health = rockDurability[size];
@@ -512,12 +550,12 @@ function createRockResource(
     yieldCount: size === 'large' ? 6 : size === 'normal' ? 3 : 2,
     health,
     maxHealth: health,
-    radius: 1.2 * scale,
+    radius: 1.2 * sizeScale,
     resourceType: 'rock',
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
   };
-  mesh.userData.resourceNode = node;
+  mesh.traverse((child) => { child.userData.resourceNode = node; });
   return node;
 }
 
@@ -1038,6 +1076,10 @@ const ATTACK_COOLDOWN_MS = 1000;
 let lastAttackAt = -Infinity;
 
 function disposeObject3D(object: THREE.Object3D) {
+  // Blender製木モデルは全インスタンスでジオメトリ・マテリアルを共有しているため、
+  // 1本削除するたびに共有アセットをdisposeすると残りの木が壊れてしまう。
+  if (object.userData.sharedAsset) return;
+
   object.traverse((child) => {
     const mesh = child as THREE.Mesh;
     if (mesh.geometry) mesh.geometry.dispose();
@@ -1781,8 +1823,66 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-function initializeGame() {
-  // すべての変数・関数・定数が初期化された後にゲーム状態を構築する。
+function loadWoodModel(): Promise<void> {
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      '/wood1.glb',
+      (gltf) => {
+        woodModelTemplate = gltf.scene;
+        woodModelTemplate.userData.sharedAsset = true;
+
+        // Blender側の大きさが多少違っていても、ゲーム内では従来の木と同程度の
+        // 高さ（約15）になるように自動調整する。
+        const box = new THREE.Box3().setFromObject(woodModelTemplate);
+        const height = box.max.y - box.min.y;
+        if (height > 0.001) {
+          woodModelTemplate.scale.setScalar(15 / height);
+        }
+
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.error('wood1.glbの読み込みに失敗しました。従来の木モデルを使用します。', error);
+        woodModelTemplate = null;
+        resolve();
+      }
+    );
+  });
+}
+
+function loadRockModel(): Promise<void> {
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      '/stone1.glb',
+      (gltf) => {
+        rockModelTemplate = gltf.scene;
+        rockModelTemplate.userData.sharedAsset = true;
+
+        // Blender側の大きさが違っていても、ゲーム内では従来の岩と同程度の
+        // 高さ（約2.4）になるように自動調整する。
+        const box = new THREE.Box3().setFromObject(rockModelTemplate);
+        const height = box.max.y - box.min.y;
+        if (height > 0.001) {
+          rockModelTemplate.scale.setScalar(2.4 / height);
+        }
+
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.error('rock1.glbの読み込みに失敗しました。従来の岩モデルを使用します。', error);
+        rockModelTemplate = null;
+        resolve();
+      }
+    );
+  });
+}
+
+async function initializeGame() {
+  // Blender製の木・岩モデルを先に読み込んでから資源を生成する。
+  // どちらかの読み込みに失敗してもゲーム自体は開始できるようにする。
+  await Promise.all([loadWoodModel(), loadRockModel()]);
   spawnAllIslandResources();
   rebuildResourceHitObjects();
   updateUI();
