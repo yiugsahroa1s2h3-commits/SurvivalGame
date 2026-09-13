@@ -155,6 +155,10 @@ function getCurrentIslandName(x: number, z: number): string {
   return '海の上';
 }
 
+function isWaterAt(x: number, z: number): boolean {
+  return getTerrainHeightAt(x, z) <= SEA_LEVEL + 0.05;
+}
+
 // 見た目の地形メッシュを高さマップから生成（当たり判定と完全一致させる）
 function buildTerrainMesh(excludeGreenIsland = false): THREE.Mesh {
   const size = 2200;
@@ -469,6 +473,8 @@ const gltfLoader = new GLTFLoader();
 let woodModelTemplate: THREE.Group | null = null;
 let rockModelTemplate: THREE.Group | null = null;
 let groundModelTemplate: THREE.Group | null = null;
+let leafModelTemplate: THREE.Group | null = null;
+let berryModelTemplate: THREE.Group | null = null;
 
 const treeDurability: Record<ResourceNode['resourceSize'], number> = {
   small: 50,
@@ -481,6 +487,13 @@ const rockDurability: Record<ResourceNode['resourceSize'], number> = {
   normal: 100,
   large: 125,
 };
+
+function placeObjectOnGround(object: THREE.Object3D, x: number, z: number, groundY: number): void {
+  object.position.set(x, 0, z);
+  object.updateWorldMatrix(true, true);
+  const bounds = new THREE.Box3().setFromObject(object);
+  object.position.y += groundY - bounds.min.y;
+}
 
 function getResourceSizeName(size: ResourceNode['resourceSize']): string {
   if (size === 'small') return '小さい';
@@ -518,9 +531,7 @@ function createTreeResource(
     group.scale.multiplyScalar(sizeScale);
 
     // Blender側の原点が木の根元からずれていても、地面に接するように補正する。
-    const box = new THREE.Box3().setFromObject(group);
-    const minY = box.min.y;
-    group.position.set(x, groundY - minY, z);
+    placeObjectOnGround(group, x, z, groundY);
   } else {
     group = new THREE.Group();
 
@@ -538,7 +549,7 @@ function createTreeResource(
     leaves.position.y = 9 * sizeScale;
     group.add(leaves);
 
-    group.position.set(x, groundY, z);
+    placeObjectOnGround(group, x, z, groundY);
   }
 
   scene.add(group);
@@ -575,9 +586,7 @@ function createRockResource(
     group.scale.multiplyScalar(sizeScale);
 
     // stone1.glbの原点が岩の中心などになっていても、岩の底面が地面に接するように補正する。
-    const box = new THREE.Box3().setFromObject(group);
-    const minY = box.min.y;
-    group.position.set(x, groundY - minY, z);
+    placeObjectOnGround(group, x, z, groundY);
     mesh = group;
   } else {
     // stone1.glbが読み込めなかった場合の従来モデル。
@@ -585,7 +594,7 @@ function createRockResource(
       new THREE.DodecahedronGeometry(1.2 * sizeScale, 1),
       new THREE.MeshLambertMaterial({ color: 0x708090 })
     );
-    fallback.position.set(x, groundY + 0.6 * sizeScale, z);
+    placeObjectOnGround(fallback, x, z, groundY);
     mesh = fallback;
   }
 
@@ -628,7 +637,16 @@ function createPickupResource(
     mushroom: 0xc8b24a,
   };
 
-  // 拾える資源は1個の立体メッシュにまとめる。見た目を保ちつつ描画負荷を抑える。
+  let mesh: THREE.Group | THREE.Mesh;
+  const modelTemplate = itemId === 'leaf' ? leafModelTemplate : itemId === 'berry' ? berryModelTemplate : null;
+
+  if (modelTemplate) {
+    const group = modelTemplate.clone(true);
+    group.rotation.y = Math.random() * Math.PI * 2;
+    placeObjectOnGround(group, x, z, groundY);
+    mesh = group;
+  } else {
+    // 拾える資源は1個の立体メッシュにまとめる。見た目を保ちつつ描画負荷を抑える。
   let geometry: THREE.BufferGeometry;
   if (itemId === 'leaf' || itemId === 'high_grade_wood') {
     geometry = new THREE.SphereGeometry(0.65, 6, 4);
@@ -645,13 +663,15 @@ function createPickupResource(
   }
 
   const material = new THREE.MeshLambertMaterial({ color: colors[itemId] ?? 0x7aa35a });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.position.set(x, groundY + 0.35, z);
+  mesh = new THREE.Mesh(geometry, material);
   mesh.rotation.set(0, Math.random() * Math.PI * 2, itemId === 'leaf' ? 0.35 : 0);
 
   if (itemId === 'leaf') mesh.scale.set(1.4, 0.3, 0.9);
   else if (itemId === 'iron_fragment') mesh.rotation.z = 0.25;
   else if (itemId === 'mushroom') mesh.scale.y = 0.75;
+
+  placeObjectOnGround(mesh, x, z, groundY);
+  }
 
   scene.add(mesh);
   const node: ResourceNode = {
@@ -667,7 +687,7 @@ function createPickupResource(
     resourceSize: 'small',
     islandName,
   };
-  mesh.userData.resourceNode = node;
+  mesh.traverse((child) => { child.userData.resourceNode = node; });
   return node;
 }
 
@@ -709,7 +729,15 @@ function spawnIslandResources(
 
   for (const [itemId, count] of Object.entries(pickupCounts)) {
     const names: Record<string, string> = {
-      leaf: '葉', high_grade_wood: '高級木材', hide: '皮', clay: '粘土', iron_fragment: '鉄の破片', berry: 'ベリー', mushroom: 'キノコ'
+      leaf: '葉', high_grade_wood: '高級木材', hide: '皮', clay: '粘土', iron_fragment: '鉄の破片',
+      sand: '砂', rock_salt: '岩塩', coal: '石炭', sulfur_ore: '硫黄原石', copper_ore: '銅原石',
+      silver_ore: '銀原石', gold_ore: '金原石', platinum_ore: 'プラチナの原石', bone: '骨',
+      cooking_oil: '調理油', plastic: 'プラスチック', petroleum: '石油', silicon: 'シリコン',
+      sugar: '砂糖', cinnamon: 'シナモン', vanilla_pod: 'バニラビーンズのさや', vanilla: 'バニラ',
+      mint: 'ミントの生葉', cocoa: 'カカオ豆', maple_syrup: 'メープルシロップの蜜', wheat: '小麦',
+      flour: '小麦粉', berry: 'ベリー', watermelon: 'スイカ', tomato: 'トマト', corn: 'トウモロコシ',
+      mushroom: 'キノコ', potato: 'じゃがいも', raw_fish: '生魚', shrimp: 'エビ', milk: '牛乳',
+      cheese: 'チーズ', raw_egg: '生卵', raw_chicken: '生鶏肉', raw_beef: '生牛肉', bottle_water: 'ボトル入り水'
     };
     for (let i = 0; i < count; i++) {
       const point = randomPointOnIsland(isl, 8);
@@ -728,15 +756,15 @@ function spawnIslandResources(
 // スゥイート：木・石は少なめ、食料系を多めにする。
 function spawnAllIslandResources() {
   // グリーンアイランド：草地を中心に、木・石・葉・粘土・食料を幅広く大量配置。
-  spawnIslandResources(islands[0], 45, 30, { leaf: 140, clay: 35, berry: 30, mushroom: 15, high_grade_wood: 4 });
+  spawnIslandResources(islands[0], 45, 30, { leaf: 140, clay: 35, berry: 30, mushroom: 15, high_grade_wood: 4, potato: 35, tomato: 35, corn: 35, wheat: 35, raw_chicken: 12, raw_beef: 12, raw_egg: 20, bottle_water: 20, cooking_oil: 12 });
   // フォレストアイランド：木を圧倒的に多く、葉も大量。
-  spawnIslandResources(islands[1], 240, 35, { leaf: 700, berry: 80, mushroom: 80, clay: 50, high_grade_wood: 40 });
+  spawnIslandResources(islands[1], 240, 35, { leaf: 700, berry: 80, mushroom: 80, clay: 50, high_grade_wood: 40, mint: 45, cocoa: 35, vanilla_pod: 20, cinnamon: 20, raw_fish: 20, shrimp: 20 });
   // オールドシティアイランド：木・石は少なめ、鉄の破片と粘土を大量配置。
-  spawnIslandResources(islands[2], 18, 18, { leaf: 60, clay: 160, iron_fragment: 220, hide: 20 });
+  spawnIslandResources(islands[2], 18, 18, { leaf: 60, clay: 160, iron_fragment: 220, hide: 20, sand: 150, plastic: 25, petroleum: 15, bone: 25, gold_ore: 10, silver_ore: 15 });
   // マウンテンアイランド：石を圧倒的に多く、鉄の破片も少し配置。
-  spawnIslandResources(islands[3], 22, 220, { leaf: 40, iron_fragment: 120, clay: 55 });
+  spawnIslandResources(islands[3], 22, 220, { leaf: 40, iron_fragment: 120, clay: 55, coal: 100, sulfur_ore: 40, copper_ore: 40, silver_ore: 25, gold_ore: 25, platinum_ore: 10, silicon: 20, rock_salt: 35 });
   // スゥイートアイランド：木・石は少なめ、食料系を大量配置。
-  spawnIslandResources(islands[4], 18, 22, { leaf: 70, berry: 280, mushroom: 150, clay: 25 });
+  spawnIslandResources(islands[4], 18, 22, { leaf: 70, berry: 280, mushroom: 150, clay: 25, watermelon: 60, sugar: 100, maple_syrup: 30, vanilla: 25, milk: 35, cheese: 15, wheat: 70 });
 }
 
 
@@ -799,6 +827,117 @@ const craftRecipes: Recipe[] = [
   { id: 'trap', name: '罠', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 30 }, { id: 'rope', name: '縄', count: 5 }] },
   { id: 'boat', name: 'ボート', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 300 }, { id: 'rope', name: '縄', count: 20 }] },
 ];
+
+// READMEに記載された全料理・加工品・構造物を、同じインベントリ経済へ登録する。
+craftRecipes.push(
+  { id: 'melted_sulfur', name: '溶かした硫黄', resultCount: 1, ingredients: [{ id: 'sulfur_ore', name: '硫黄原石', count: 1 }] },
+  { id: 'copper_fragment', name: '銅の破片', resultCount: 1, ingredients: [{ id: 'copper_ore', name: '銅原石', count: 1 }] },
+  { id: 'silver_fragment', name: '銀の破片', resultCount: 1, ingredients: [{ id: 'silver_ore', name: '銀原石', count: 1 }] },
+  { id: 'gold_fragment', name: '金の破片', resultCount: 1, ingredients: [{ id: 'gold_ore', name: '金原石', count: 1 }] },
+  { id: 'platinum_fragment', name: 'プラチナの破片', resultCount: 1, ingredients: [{ id: 'platinum_ore', name: 'プラチナの原石', count: 1 }] },
+  { id: 'grilled_skewer', name: '串焼き', resultCount: 1, ingredients: [{ id: 'raw_chicken', name: '生鶏肉', count: 2 }, { id: 'corn', name: 'トウモロコシ', count: 1 }, { id: 'potato', name: 'じゃがいも', count: 1 }] },
+  { id: 'vegetable_soup', name: '野菜スープ', resultCount: 1, ingredients: [{ id: 'potato', name: 'じゃがいも', count: 3 }, { id: 'mushroom', name: 'キノコ', count: 3 }, { id: 'corn', name: 'トウモロコシ', count: 3 }, { id: 'tomato', name: 'トマト', count: 3 }, { id: 'bottle_water', name: 'ボトル入り水', count: 2 }, { id: 'rock_salt', name: '岩塩', count: 2 }] },
+  { id: 'seafood_soup', name: '魚介スープ', resultCount: 1, ingredients: [{ id: 'raw_fish', name: '生魚', count: 2 }, { id: 'shrimp', name: 'エビ', count: 5 }, { id: 'rock_salt', name: '岩塩', count: 2 }] },
+  { id: 'omelet', name: 'オムレツ', resultCount: 1, ingredients: [{ id: 'raw_egg', name: '生卵', count: 1 }, { id: 'milk', name: '牛乳', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'beef_stew', name: '肉じゃが', resultCount: 1, ingredients: [{ id: 'raw_beef', name: '生牛肉', count: 1 }, { id: 'potato', name: 'じゃがいも', count: 3 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'grilled_corn', name: '焼きとうもろこし', resultCount: 1, ingredients: [{ id: 'corn', name: 'トウモロコシ', count: 3 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'sauteed_mushroom', name: 'きのこ炒め', resultCount: 1, ingredients: [{ id: 'mushroom', name: 'キノコ', count: 4 }, { id: 'cooking_oil', name: '調理油', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'meuniere', name: '魚のムニエル', resultCount: 1, ingredients: [{ id: 'raw_fish', name: '生魚', count: 2 }, { id: 'cooking_oil', name: '調理油', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'cheese_omelet', name: 'チーズオムレツ', resultCount: 1, ingredients: [{ id: 'raw_egg', name: '生卵', count: 2 }, { id: 'milk', name: '牛乳', count: 2 }, { id: 'rock_salt', name: '岩塩', count: 1 }, { id: 'cheese', name: 'チーズ', count: 1 }] },
+  { id: 'vegetable_stir_fry', name: '野菜炒め', resultCount: 1, ingredients: [{ id: 'potato', name: 'じゃがいも', count: 1 }, { id: 'corn', name: 'トウモロコシ', count: 1 }, { id: 'tomato', name: 'トマト', count: 2 }, { id: 'cooking_oil', name: '調理油', count: 1 }] },
+  { id: 'grilled_shrimp', name: '焼きエビ', resultCount: 1, ingredients: [{ id: 'shrimp', name: 'エビ', count: 5 }, { id: 'rock_salt', name: '岩塩', count: 1 }, { id: 'cooking_oil', name: '調理油', count: 1 }] },
+  { id: 'meat_stir_fry', name: '肉野菜炒め', resultCount: 1, ingredients: [{ id: 'raw_beef', name: '生牛肉', count: 1 }, { id: 'potato', name: 'じゃがいも', count: 2 }, { id: 'tomato', name: 'トマト', count: 1 }, { id: 'cooking_oil', name: '調理油', count: 1 }] },
+  { id: 'mushroom_soup', name: 'きのこスープ', resultCount: 1, ingredients: [{ id: 'mushroom', name: 'キノコ', count: 5 }, { id: 'tomato', name: 'トマト', count: 2 }, { id: 'bottle_water', name: 'ボトル入り水', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'corn_soup', name: 'コーンスープ', resultCount: 1, ingredients: [{ id: 'corn', name: 'トウモロコシ', count: 5 }, { id: 'milk', name: '牛乳', count: 2 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'chicken_potato', name: 'チキンポテト', resultCount: 1, ingredients: [{ id: 'raw_chicken', name: '生鶏肉', count: 1 }, { id: 'potato', name: 'じゃがいも', count: 3 }, { id: 'cooking_oil', name: '調理油', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'fish_vegetable_wrap', name: '魚と野菜の包み焼き', resultCount: 1, ingredients: [{ id: 'raw_fish', name: '生魚', count: 1 }, { id: 'tomato', name: 'トマト', count: 1 }, { id: 'potato', name: 'じゃがいも', count: 1 }, { id: 'corn', name: 'トウモロコシ', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'milk_stew', name: 'ミルク煮', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 3 }, { id: 'potato', name: 'じゃがいも', count: 2 }, { id: 'mushroom', name: 'キノコ', count: 2 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'cheese_potato', name: 'チーズ焼きポテト', resultCount: 1, ingredients: [{ id: 'potato', name: 'じゃがいも', count: 3 }, { id: 'cheese', name: 'チーズ', count: 1 }, { id: 'rock_salt', name: '岩塩', count: 1 }] },
+  { id: 'pudding', name: 'プリン', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'raw_egg', name: '生卵', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }] },
+  { id: 'chocolate', name: 'チョコレート', resultCount: 1, ingredients: [{ id: 'cocoa', name: 'カカオ豆', count: 3 }, { id: 'sugar', name: '砂糖', count: 3 }, { id: 'milk', name: '牛乳', count: 1 }] },
+  { id: 'chocolate_pudding', name: 'チョコプリン', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'raw_egg', name: '生卵', count: 1 }, { id: 'cocoa', name: 'カカオ豆', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }] },
+  { id: 'milk_jelly', name: 'ミルクゼリー', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }, { id: 'mint', name: 'ミントの生葉', count: 1 }] },
+  { id: 'fruit_jelly', name: 'フルーツゼリー', resultCount: 1, ingredients: [{ id: 'berry', name: 'ベリー', count: 3 }, { id: 'watermelon', name: 'スイカ', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }] },
+  { id: 'vanilla_pudding', name: 'バニラプリン', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'raw_egg', name: '生卵', count: 2 }, { id: 'sugar', name: '砂糖', count: 2 }, { id: 'vanilla', name: 'バニラ', count: 2 }] },
+  { id: 'mint_jelly', name: 'ミントゼリー', resultCount: 1, ingredients: [{ id: 'sugar', name: '砂糖', count: 3 }, { id: 'mint', name: 'ミントの生葉', count: 2 }, { id: 'bottle_water', name: 'ボトル入り水', count: 1 }] },
+  { id: 'chocolate_cake', name: 'チョコケーキ', resultCount: 1, ingredients: [{ id: 'flour', name: '小麦粉', count: 15 }, { id: 'raw_egg', name: '生卵', count: 2 }, { id: 'milk', name: '牛乳', count: 2 }, { id: 'cocoa', name: 'カカオ豆', count: 3 }, { id: 'sugar', name: '砂糖', count: 3 }] },
+  { id: 'shortcake', name: 'ショートケーキ', resultCount: 1, ingredients: [{ id: 'flour', name: '小麦粉', count: 15 }, { id: 'raw_egg', name: '生卵', count: 2 }, { id: 'milk', name: '牛乳', count: 2 }, { id: 'berry', name: 'ベリー', count: 3 }, { id: 'sugar', name: '砂糖', count: 3 }] },
+  { id: 'caramel', name: 'キャラメル', resultCount: 1, ingredients: [{ id: 'sugar', name: '砂糖', count: 5 }, { id: 'milk', name: '牛乳', count: 1 }, { id: 'cooking_oil', name: '調理油', count: 1 }] },
+  { id: 'caramel_pudding', name: 'キャラメルプリン', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'raw_egg', name: '生卵', count: 2 }, { id: 'sugar', name: '砂糖', count: 5 }] },
+  { id: 'chocolate_cookie', name: 'チョコクッキー', resultCount: 1, ingredients: [{ id: 'flour', name: '小麦粉', count: 5 }, { id: 'cocoa', name: 'カカオ豆', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }, { id: 'milk', name: '牛乳', count: 2 }] },
+  { id: 'cinnamon_cookie', name: 'シナモンクッキー', resultCount: 1, ingredients: [{ id: 'flour', name: '小麦粉', count: 5 }, { id: 'sugar', name: '砂糖', count: 3 }, { id: 'cinnamon', name: 'シナモン', count: 2 }, { id: 'milk', name: '牛乳', count: 2 }] },
+  { id: 'maple_pancake', name: 'メープルパンケーキ', resultCount: 1, ingredients: [{ id: 'flour', name: '小麦粉', count: 10 }, { id: 'raw_egg', name: '生卵', count: 1 }, { id: 'milk', name: '牛乳', count: 1 }, { id: 'maple_syrup', name: 'メープルシロップの蜜', count: 3 }] },
+  { id: 'honey_milk', name: 'ハニーミルク', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'maple_syrup', name: 'メープルシロップの蜜', count: 3 }, { id: 'vanilla', name: 'バニラ', count: 2 }] },
+  { id: 'choco_mint_ice', name: 'チョコミントアイス', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'cocoa', name: 'カカオ豆', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }, { id: 'mint', name: 'ミントの生葉', count: 2 }] },
+  { id: 'vanilla_ice', name: 'バニラアイス', resultCount: 1, ingredients: [{ id: 'milk', name: '牛乳', count: 2 }, { id: 'sugar', name: '砂糖', count: 3 }, { id: 'vanilla_pod', name: 'バニラビーンズのさや', count: 1 }] },
+  { id: 'ultimate_sweets', name: '究極のスイーツプレート', resultCount: 1, ingredients: [{ id: 'chocolate', name: 'チョコレート', count: 1 }, { id: 'pudding', name: 'プリン', count: 1 }, { id: 'shortcake', name: 'ショートケーキ', count: 1 }, { id: 'mint', name: 'ミントの生葉', count: 1 }, { id: 'maple_syrup', name: 'メープルシロップの蜜', count: 2 }] },
+  { id: 'wooden_hatch', name: '木のハッチ', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 200 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'wooden_door', name: '木のドア', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 100 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'wooden_window', name: '木の窓', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 50 }, { id: 'plastic', name: 'プラスチック', count: 5 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'wooden_stairs', name: '木の階段', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 100 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'wooden_ladder', name: '木のはしご', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 80 }, { id: 'rope', name: '縄', count: 2 }] },
+  { id: 'wooden_box', name: '木製ボックス', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 150 }, { id: 'rope', name: '縄', count: 3 }] },
+  { id: 'stone_box', name: '石製ボックス', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 100 }, { id: 'wood', name: '木材', count: 125 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'iron_box', name: '鉄製ボックス', resultCount: 1, ingredients: [{ id: 'iron_fragment', name: '鉄の破片', count: 125 }, { id: 'high_grade_wood', name: '高級木材', count: 50 }, { id: 'rope', name: '縄', count: 8 }] },
+  { id: 'stone_ceiling', name: '石の天井', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 50 }, { id: 'rope', name: '縄', count: 3 }, { id: 'stone', name: '石', count: 150 }] },
+  { id: 'iron_ceiling', name: '鉄の天井', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 50 }, { id: 'iron_fragment', name: '鉄の破片', count: 100 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'stone_hatch', name: '石のハッチ', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 100 }, { id: 'rope', name: '縄', count: 3 }, { id: 'stone', name: '石', count: 250 }] },
+  { id: 'iron_hatch', name: '鉄のハッチ', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 100 }, { id: 'iron_fragment', name: '鉄の破片', count: 120 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'stone_door', name: '石のドア', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 30 }, { id: 'rope', name: '縄', count: 3 }, { id: 'stone', name: '石', count: 150 }] },
+  { id: 'iron_door', name: '鉄のドア', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 30 }, { id: 'iron_fragment', name: '鉄の破片', count: 80 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'stone_window', name: '石の窓', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 30 }, { id: 'stone', name: '石', count: 100 }, { id: 'plastic', name: 'プラスチック', count: 5 }, { id: 'rope', name: '縄', count: 3 }] },
+  { id: 'iron_window', name: '鉄の窓', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 20 }, { id: 'iron_fragment', name: '鉄の破片', count: 50 }, { id: 'plastic', name: 'プラスチック', count: 5 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'stone_stairs', name: '石の階段', resultCount: 1, ingredients: [{ id: 'wood', name: '木材', count: 30 }, { id: 'rope', name: '縄', count: 3 }, { id: 'stone', name: '石', count: 250 }] },
+  { id: 'iron_stairs', name: '鉄の階段', resultCount: 1, ingredients: [{ id: 'high_grade_wood', name: '高級木材', count: 30 }, { id: 'iron_fragment', name: '鉄の破片', count: 70 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'stone_ladder', name: '石のはしご', resultCount: 1, ingredients: [{ id: 'stone', name: '石', count: 150 }, { id: 'rope', name: '縄', count: 3 }] },
+  { id: 'iron_ladder', name: '鉄のはしご', resultCount: 1, ingredients: [{ id: 'iron_fragment', name: '鉄の破片', count: 60 }, { id: 'rope', name: '縄', count: 5 }] },
+  { id: 'grilled_fish', name: '焼き魚', resultCount: 1, ingredients: [{ id: 'raw_fish', name: '生魚', count: 1 }] },
+  { id: 'cooked_chicken', name: '調理された鶏肉', resultCount: 1, ingredients: [{ id: 'raw_chicken', name: '生鶏肉', count: 1 }] },
+  { id: 'cooked_beef', name: '調理された牛肉', resultCount: 1, ingredients: [{ id: 'raw_beef', name: '生牛肉', count: 1 }] },
+  { id: 'flour', name: '小麦粉', resultCount: 1, ingredients: [{ id: 'wheat', name: '小麦', count: 2 }] },
+);
+
+interface FoodEffect { hp: number; hunger: number; thirst: number; duration: number; attack?: number; speed?: number; }
+const foodEffects: Record<string, FoodEffect> = {
+  grilled_fish: { hp: 12, hunger: 18, thirst: 3, duration: 0 }, cooked_chicken: { hp: 16, hunger: 20, thirst: 0, duration: 0 }, cooked_beef: { hp: 20, hunger: 24, thirst: 0, duration: 0 },
+  grilled_skewer: { hp: 15, hunger: 15, thirst: 0, duration: 300, attack: 1.2 }, vegetable_soup: { hp: 12, hunger: 20, thirst: 15, duration: 900 },
+  seafood_soup: { hp: 21, hunger: 18, thirst: 15, duration: 300 }, omelet: { hp: 10, hunger: 10, thirst: 0, duration: 300, speed: 1.1 }, beef_stew: { hp: 18, hunger: 22, thirst: 0, duration: 600 },
+  grilled_corn: { hp: 8, hunger: 15, thirst: 0, duration: 300 }, sauteed_mushroom: { hp: 13, hunger: 12, thirst: 0, duration: 300 }, meuniere: { hp: 20, hunger: 18, thirst: 0, duration: 300 },
+  cheese_omelet: { hp: 22, hunger: 18, thirst: 0, duration: 480, speed: 1.1 }, vegetable_stir_fry: { hp: 15, hunger: 19, thirst: 0, duration: 600 }, grilled_shrimp: { hp: 18, hunger: 15, thirst: 0, duration: 300 },
+  meat_stir_fry: { hp: 23, hunger: 24, thirst: 0, duration: 300, attack: 1.1 }, mushroom_soup: { hp: 15, hunger: 18, thirst: 12, duration: 600 }, corn_soup: { hp: 16, hunger: 20, thirst: 8, duration: 600 },
+  chicken_potato: { hp: 21, hunger: 25, thirst: 0, duration: 300 }, fish_vegetable_wrap: { hp: 24, hunger: 23, thirst: 0, duration: 480 }, milk_stew: { hp: 18, hunger: 21, thirst: 8, duration: 600 }, cheese_potato: { hp: 20, hunger: 24, thirst: 0, duration: 480 },
+  pudding: { hp: 12, hunger: 18, thirst: 3, duration: 300, speed: 1.05 }, chocolate: { hp: 10, hunger: 20, thirst: 0, duration: 300, attack: 1.1 }, chocolate_pudding: { hp: 18, hunger: 24, thirst: 3, duration: 480, attack: 1.1 }, milk_jelly: { hp: 11, hunger: 17, thirst: 8, duration: 600 },
+  fruit_jelly: { hp: 15, hunger: 20, thirst: 12, duration: 480 }, vanilla_pudding: { hp: 16, hunger: 22, thirst: 5, duration: 600 }, mint_jelly: { hp: 8, hunger: 14, thirst: 18, duration: 300, speed: 1.15 }, chocolate_cake: { hp: 25, hunger: 30, thirst: 0, duration: 600, attack: 1.15 },
+  shortcake: { hp: 23, hunger: 32, thirst: 4, duration: 600 }, caramel: { hp: 7, hunger: 25, thirst: 0, duration: 300 }, caramel_pudding: { hp: 20, hunger: 27, thirst: 3, duration: 600 }, chocolate_cookie: { hp: 14, hunger: 26, thirst: 0, duration: 300 },
+  cinnamon_cookie: { hp: 12, hunger: 23, thirst: 0, duration: 600, speed: 1.1 }, maple_pancake: { hp: 18, hunger: 30, thirst: 5, duration: 600 }, honey_milk: { hp: 15, hunger: 20, thirst: 15, duration: 600 }, choco_mint_ice: { hp: 17, hunger: 25, thirst: 8, duration: 480 }, vanilla_ice: { hp: 14, hunger: 23, thirst: 10, duration: 600 }, ultimate_sweets: { hp: 35, hunger: 45, thirst: 15, duration: 900, attack: 1.15, speed: 1.1 },
+};
+const activeFoodBuffs: { effect: FoodEffect; expiresAt: number }[] = [];
+
+function consumeSelectedFood(): void {
+  const item = getSelectedHotbarItem();
+  const effect = item ? foodEffects[item.id] : undefined;
+  if (!item || !effect || isInventoryOpen || isMapOpen) return;
+  hp = Math.min(100, hp + effect.hp);
+  hunger = Math.min(100, hunger + effect.hunger);
+  thirst = Math.min(100, thirst + effect.thirst);
+  const existing = activeFoodBuffs.find((buff) => buff.effect.attack === effect.attack && buff.effect.speed === effect.speed);
+  if (existing) existing.expiresAt = performance.now() / 1000 + effect.duration;
+  else {
+    if (activeFoodBuffs.length >= 2) activeFoodBuffs.shift();
+    activeFoodBuffs.push({ effect, expiresAt: performance.now() / 1000 + effect.duration });
+  }
+  item.count -= 1;
+  if (item.count <= 0) inventoryData[10 + activeHotbarIndex] = null;
+  renderUI();
+}
+
+function getFoodMultiplier(kind: 'attack' | 'speed'): number {
+  const now = performance.now() / 1000;
+  for (let i = activeFoodBuffs.length - 1; i >= 0; i--) {
+    if (activeFoodBuffs[i].expiresAt <= now) activeFoodBuffs.splice(i, 1);
+  }
+  return activeFoodBuffs.reduce((value, buff) => value * (buff.effect[kind] ?? 1), 1);
+}
 
 let draggedIndex: number | null = null;
 
@@ -962,6 +1101,7 @@ function renderUI() {
 function toggleInventory() {
   isInventoryOpen = !isInventoryOpen;
   if (isInventoryOpen) {
+    stopAttackHold();
     if (isMapOpen) toggleMap();
     inventoryModal.classList.add('active');
     document.exitPointerLock();
@@ -980,6 +1120,7 @@ const mapCtx = mapCanvas.getContext('2d')!;
 function toggleMap() {
   isMapOpen = !isMapOpen;
   if (isMapOpen) {
+    stopAttackHold();
     if (isInventoryOpen) toggleInventory();
     mapModal.classList.add('active');
     document.exitPointerLock();
@@ -1152,7 +1293,7 @@ function attackNearestNode() {
   const weapon = getSelectedWeapon();
   if (!weapon) return;
 
-  const damage = weapon.vsResource;
+  const damage = Math.max(1, Math.round(weapon.vsResource * getFoodMultiplier('attack')));
 
   // 資源は「壊した瞬間」にだけ獲得する。
   // 最後の一撃でインベントリが満杯になる場合は、耐久を減らさない。
@@ -1319,7 +1460,12 @@ let isBuildMode = false;
 let buildRotation = 0;
 let buildPreview: THREE.Mesh | null = null;
 
-const buildableIds = new Set(['wooden_floor', 'wooden_wall', 'wooden_ceiling', 'stone_floor', 'stone_wall', 'iron_floor', 'iron_wall', 'campfire', 'furnace', 'cooking_station', 'workbench', 'water_storage', 'box', 'shelf', 'lock', 'tribe_flag', 'spikes', 'trap', 'boat']);
+const buildableIds = new Set([
+  'toolbox', 'wooden_floor', 'wooden_wall', 'wooden_ceiling', 'wooden_hatch', 'wooden_door', 'wooden_window', 'wooden_stairs', 'wooden_ladder',
+  'stone_floor', 'stone_wall', 'stone_ceiling', 'stone_hatch', 'stone_door', 'stone_window', 'stone_stairs', 'stone_ladder',
+  'iron_floor', 'iron_wall', 'iron_ceiling', 'iron_hatch', 'iron_door', 'iron_window', 'iron_stairs', 'iron_ladder',
+  'campfire', 'furnace', 'cooking_station', 'workbench', 'water_storage', 'box', 'wooden_box', 'stone_box', 'iron_box', 'shelf', 'lock', 'tribe_flag', 'spikes', 'trap', 'boat'
+]);
 
 // 初期UI描画は全ての依存関係を初期化した後に行う
 
@@ -1332,10 +1478,10 @@ function createBuildingMesh(id: string): THREE.Mesh {
   let geometry: THREE.BufferGeometry;
   let material: THREE.Material;
 
-  if (id.includes('wall')) {
+  if (id.includes('wall') || id.includes('door') || id.includes('window')) {
     // 壁は十分な高さを確保しつつ、厚さは薄めにする。
     geometry = new THREE.BoxGeometry(4, 4.5, 0.24);
-  } else if (id.includes('floor') || id === 'wooden_ceiling') {
+  } else if (id.includes('floor') || id.includes('ceiling') || id.includes('hatch')) {
     // 床は薄い板ではなく、しっかりした土台として使える厚みにする。
     geometry = new THREE.BoxGeometry(4, 0.5, 4);
   } else {
@@ -1343,9 +1489,9 @@ function createBuildingMesh(id: string): THREE.Mesh {
   }
 
   const colors: Record<string, number> = {
-    wooden_floor: 0x8b5a2b, wooden_wall: 0x8b5a2b, wooden_ceiling: 0x8b5a2b,
-    stone_floor: 0x808080, stone_wall: 0x808080,
-    iron_floor: 0x555b61, iron_wall: 0x555b61,
+    wooden_floor: 0x8b5a2b, wooden_wall: 0x8b5a2b, wooden_ceiling: 0x8b5a2b, wooden_hatch: 0x8b5a2b, wooden_door: 0x8b5a2b, wooden_window: 0x8b5a2b, wooden_stairs: 0x8b5a2b, wooden_ladder: 0x8b5a2b, wooden_box: 0x9b6b3c,
+    stone_floor: 0x808080, stone_wall: 0x808080, stone_ceiling: 0x808080, stone_hatch: 0x808080, stone_door: 0x808080, stone_window: 0x808080, stone_stairs: 0x808080, stone_ladder: 0x808080, stone_box: 0x808080,
+    iron_floor: 0x555b61, iron_wall: 0x555b61, iron_ceiling: 0x555b61, iron_hatch: 0x555b61, iron_door: 0x555b61, iron_window: 0x555b61, iron_stairs: 0x555b61, iron_ladder: 0x555b61, iron_box: 0x555b61,
     campfire: 0xff7a00, furnace: 0x555555, cooking_station: 0xa66a3f,
     workbench: 0x7b4a22, water_storage: 0x4682b4, box: 0x9b6b3c, shelf: 0x7b4a22,
     lock: 0xc0c0c0, tribe_flag: 0xcc3333, spikes: 0x555555, trap: 0x6b4f2a,
@@ -1486,6 +1632,11 @@ window.addEventListener('keydown', (e) => {
   if (key === 'tab') { e.preventDefault(); toggleInventory(); return; }
   if (key === 'm') { toggleMap(); return; }
 
+  if (key === 'e') {
+    consumeSelectedFood();
+    return;
+  }
+
   if (key === 'f') {
     const aimed = getAimedResourceNode();
     if (aimed && aimed.resourceType === 'pickup' && addItemToInventory(aimed.itemId, aimed.itemName, aimed.yieldCount)) {
@@ -1548,6 +1699,7 @@ function stopAttackHold() {
 
 window.addEventListener('mousedown', (e) => {
   if (e.button === 0) {
+    if (isInventoryOpen || isMapOpen) return;
     if (isBuildMode) {
       placeSelectedBuilding();
     } else {
@@ -1674,8 +1826,8 @@ function animate() {
 
   if (!paused) {
     const isSprinting = keys['shift'];
-    const inWater = getCurrentIslandName(playerGroup.position.x, playerGroup.position.z) === '海の上';
-    const speed = inWater ? SWIM_SPEED : (isSprinting ? 18 : 9);
+    const inWater = isWaterAt(playerGroup.position.x, playerGroup.position.z);
+    const speed = inWater ? SWIM_SPEED : (isSprinting ? 18 : 9) * getFoodMultiplier('speed');
 
     if (inWater !== isSwimming) {
       isSwimming = inWater;
@@ -1904,7 +2056,7 @@ function loadWoodModel(): Promise<void> {
 function loadRockModel(): Promise<void> {
   return new Promise((resolve) => {
     gltfLoader.load(
-      '/stone1.glb',
+      '/stone2.glb',
       (gltf) => {
         rockModelTemplate = gltf.scene;
         rockModelTemplate.userData.sharedAsset = true;
@@ -1926,6 +2078,46 @@ function loadRockModel(): Promise<void> {
         resolve();
       }
     );
+  });
+}
+
+function loadPickupModel(
+  path: string,
+  targetHeight: number,
+  label: string,
+  setTemplate: (template: THREE.Group | null) => void
+): Promise<void> {
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      path,
+      (gltf) => {
+        const template = gltf.scene;
+        template.userData.sharedAsset = true;
+        const box = new THREE.Box3().setFromObject(template);
+        const height = box.max.y - box.min.y;
+        if (height > 0.001) template.scale.setScalar(targetHeight / height);
+        setTemplate(template);
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.warn(`${label} の読み込みに失敗しました。従来のモデルを使用します。`, error);
+        setTemplate(null);
+        resolve();
+      }
+    );
+  });
+}
+
+function loadLeafModel(): Promise<void> {
+  return loadPickupModel('/leaf1.glb', 1.2, 'leaf1.glb', (template) => {
+    leafModelTemplate = template;
+  });
+}
+
+function loadBerryModel(): Promise<void> {
+  return loadPickupModel('/berry1.glb', 1.1, 'berry1.glb', (template) => {
+    berryModelTemplate = template;
   });
 }
 
@@ -1990,7 +2182,7 @@ function addBlenderGround(): void {
 
 async function initializeGame() {
   // Blender製モデルを先に読み込む。groud1.glbがある場合は、Green Islandの旧地面を使わない。
-  await Promise.all([loadWoodModel(), loadRockModel(), loadGroundModel()]);
+  await Promise.all([loadWoodModel(), loadRockModel(), loadLeafModel(), loadBerryModel(), loadGroundModel()]);
 
   addBlenderGround();
 
