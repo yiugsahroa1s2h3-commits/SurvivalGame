@@ -445,6 +445,8 @@ interface ResourceNode {
   resourceType: 'tree' | 'rock' | 'pickup';
   resourceSize: 'small' | 'normal' | 'large';
   islandName: string;
+  collisionCenterX?: number;
+  collisionCenterZ?: number;
 }
 
 interface WeaponStats {
@@ -470,11 +472,18 @@ const resourceNodes: ResourceNode[] = [];
 // Blenderで作成した木モデル（public/wood1.glb）を共有して使う。
 // すべての木で同じジオメトリを共有することで、木が大量にあっても無駄な読み込みを避ける。
 const gltfLoader = new GLTFLoader();
+const MODEL_PATHS = {
+  wood: '/wood1.glb',
+  stone: '/stone2.glb',
+  berry: '/berry1.glb',
+  leaf: '/leaf1.glb',
+  ground: '/groud1.glb',
+} as const;
 let woodModelTemplate: THREE.Group | null = null;
 let rockModelTemplate: THREE.Group | null = null;
 let groundModelTemplate: THREE.Group | null = null;
-let leafModelTemplate: THREE.Group | null = null;
 let berryModelTemplate: THREE.Group | null = null;
+let leafModelTemplate: THREE.Group | null = null;
 
 const treeDurability: Record<ResourceNode['resourceSize'], number> = {
   small: 50,
@@ -637,43 +646,75 @@ function createPickupResource(
     mushroom: 0xc8b24a,
   };
 
+  // berry1.glb / leaf1.glb が読み込まれていれば、それぞれBlender製モデルを使用する。
+  // 読み込めなかった場合は従来の簡易モデルへフォールバックする。
   let mesh: THREE.Group | THREE.Mesh;
-  const modelTemplate = itemId === 'leaf' ? leafModelTemplate : itemId === 'berry' ? berryModelTemplate : null;
 
-  if (modelTemplate) {
-    const group = modelTemplate.clone(true);
+  if (itemId === 'berry' && berryModelTemplate) {
+    const group = berryModelTemplate.clone(true);
+    const box = new THREE.Box3().setFromObject(group);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDimension = Math.max(size.x, size.y, size.z);
+    const targetScale = 1.7;
+    if (maxDimension > 0.001) {
+      group.scale.multiplyScalar(targetScale / maxDimension);
+    }
+    group.rotation.y = Math.random() * Math.PI * 2;
+    placeObjectOnGround(group, x, z, groundY);
+    mesh = group;
+  } else if (itemId === 'leaf' && leafModelTemplate) {
+    const group = leafModelTemplate.clone(true);
+    const box = new THREE.Box3().setFromObject(group);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDimension = Math.max(size.x, size.y, size.z);
+    const targetScale = 2.3;
+    if (maxDimension > 0.001) {
+      group.scale.multiplyScalar(targetScale / maxDimension);
+    }
     group.rotation.y = Math.random() * Math.PI * 2;
     placeObjectOnGround(group, x, z, groundY);
     mesh = group;
   } else {
-    // 拾える資源は1個の立体メッシュにまとめる。見た目を保ちつつ描画負荷を抑える。
-  let geometry: THREE.BufferGeometry;
-  if (itemId === 'leaf' || itemId === 'high_grade_wood') {
-    geometry = new THREE.SphereGeometry(0.65, 6, 4);
-  } else if (itemId === 'clay') {
-    geometry = new THREE.DodecahedronGeometry(0.75, 0);
-  } else if (itemId === 'iron_fragment') {
-    geometry = new THREE.BoxGeometry(1.0, 0.3, 0.65);
-  } else if (itemId === 'berry') {
-    geometry = new THREE.IcosahedronGeometry(0.55, 0);
-  } else if (itemId === 'mushroom') {
-    geometry = new THREE.SphereGeometry(0.55, 7, 5);
-  } else {
-    geometry = new THREE.IcosahedronGeometry(0.6, 0);
-  }
+    // GLBがない場合の従来モデル。
+    let geometry: THREE.BufferGeometry;
+    if (itemId === 'leaf' || itemId === 'high_grade_wood') {
+      geometry = new THREE.SphereGeometry(0.9, 8, 5);
+    } else if (itemId === 'clay') {
+      geometry = new THREE.DodecahedronGeometry(0.9, 0);
+    } else if (itemId === 'iron_fragment') {
+      geometry = new THREE.BoxGeometry(1.2, 0.35, 0.8);
+    } else if (itemId === 'berry') {
+      geometry = new THREE.IcosahedronGeometry(0.8, 0);
+    } else if (itemId === 'mushroom') {
+      geometry = new THREE.SphereGeometry(0.75, 8, 6);
+    } else {
+      geometry = new THREE.IcosahedronGeometry(0.75, 0);
+    }
 
-  const material = new THREE.MeshLambertMaterial({ color: colors[itemId] ?? 0x7aa35a });
-  mesh = new THREE.Mesh(geometry, material);
-  mesh.rotation.set(0, Math.random() * Math.PI * 2, itemId === 'leaf' ? 0.35 : 0);
+    const material = new THREE.MeshLambertMaterial({ color: colors[itemId] ?? 0x7aa35a });
+    const fallback = new THREE.Mesh(geometry, material);
+    fallback.rotation.set(0, Math.random() * Math.PI * 2, itemId === 'leaf' ? 0.35 : 0);
 
-  if (itemId === 'leaf') mesh.scale.set(1.4, 0.3, 0.9);
-  else if (itemId === 'iron_fragment') mesh.rotation.z = 0.25;
-  else if (itemId === 'mushroom') mesh.scale.y = 0.75;
+    if (itemId === 'leaf') fallback.scale.set(1.8, 0.45, 1.1);
+    else if (itemId === 'iron_fragment') fallback.rotation.z = 0.25;
+    else if (itemId === 'mushroom') fallback.scale.y = 0.8;
+    else if (itemId === 'berry') fallback.scale.set(1.4, 1.4, 1.4);
 
-  placeObjectOnGround(mesh, x, z, groundY);
+    placeObjectOnGround(fallback, x, z, groundY);
+    mesh = fallback;
   }
 
   scene.add(mesh);
+  // GLBの見た目の大きさから、XZ方向の当たり判定半径を算出する。
+  // これでberry1.glb / leaf1.glbにも実際の大きさに応じた衝突範囲を持たせる。
+  const collisionBox = new THREE.Box3().setFromObject(mesh);
+  const collisionSize = collisionBox.getSize(new THREE.Vector3());
+  const collisionCenter = collisionBox.getCenter(new THREE.Vector3());
+  const collisionRadius = Math.max(
+    itemId === 'leaf' ? 0.65 : itemId === 'berry' ? 0.55 : 0.45,
+    Math.max(collisionSize.x, collisionSize.z) * 0.5
+  );
+
   const node: ResourceNode = {
     mesh,
     name: itemName,
@@ -682,7 +723,9 @@ function createPickupResource(
     yieldCount: amount,
     health: 1,
     maxHealth: 1,
-    radius: 0.35,
+    radius: collisionRadius,
+    collisionCenterX: collisionCenter.x,
+    collisionCenterZ: collisionCenter.z,
     resourceType: 'pickup',
     resourceSize: 'small',
     islandName,
@@ -898,6 +941,7 @@ craftRecipes.push(
 );
 
 interface FoodEffect { hp: number; hunger: number; thirst: number; duration: number; attack?: number; speed?: number; }
+interface ActiveFoodBuff { foodId: string; effect: FoodEffect; expiresAt: number; }
 const foodEffects: Record<string, FoodEffect> = {
   grilled_fish: { hp: 12, hunger: 18, thirst: 3, duration: 0 }, cooked_chicken: { hp: 16, hunger: 20, thirst: 0, duration: 0 }, cooked_beef: { hp: 20, hunger: 24, thirst: 0, duration: 0 },
   grilled_skewer: { hp: 15, hunger: 15, thirst: 0, duration: 300, attack: 1.2 }, vegetable_soup: { hp: 12, hunger: 20, thirst: 15, duration: 900 },
@@ -911,21 +955,27 @@ const foodEffects: Record<string, FoodEffect> = {
   shortcake: { hp: 23, hunger: 32, thirst: 4, duration: 600 }, caramel: { hp: 7, hunger: 25, thirst: 0, duration: 300 }, caramel_pudding: { hp: 20, hunger: 27, thirst: 3, duration: 600 }, chocolate_cookie: { hp: 14, hunger: 26, thirst: 0, duration: 300 },
   cinnamon_cookie: { hp: 12, hunger: 23, thirst: 0, duration: 600, speed: 1.1 }, maple_pancake: { hp: 18, hunger: 30, thirst: 5, duration: 600 }, honey_milk: { hp: 15, hunger: 20, thirst: 15, duration: 600 }, choco_mint_ice: { hp: 17, hunger: 25, thirst: 8, duration: 480 }, vanilla_ice: { hp: 14, hunger: 23, thirst: 10, duration: 600 }, ultimate_sweets: { hp: 35, hunger: 45, thirst: 15, duration: 900, attack: 1.15, speed: 1.1 },
 };
-const activeFoodBuffs: { effect: FoodEffect; expiresAt: number }[] = [];
+const activeFoodBuffs: ActiveFoodBuff[] = [];
 
 function consumeSelectedFood(): void {
   const item = getSelectedHotbarItem();
   const effect = item ? foodEffects[item.id] : undefined;
   if (!item || !effect || isInventoryOpen || isMapOpen) return;
+
+  const now = performance.now() / 1000;
+  const foodId = item.id;
   hp = Math.min(100, hp + effect.hp);
   hunger = Math.min(100, hunger + effect.hunger);
   thirst = Math.min(100, thirst + effect.thirst);
-  const existing = activeFoodBuffs.find((buff) => buff.effect.attack === effect.attack && buff.effect.speed === effect.speed);
-  if (existing) existing.expiresAt = performance.now() / 1000 + effect.duration;
-  else {
+
+  const existingIndex = activeFoodBuffs.findIndex((buff) => buff.foodId === foodId && buff.expiresAt > now);
+  if (existingIndex >= 0) {
+    activeFoodBuffs[existingIndex].expiresAt = now + effect.duration;
+  } else {
     if (activeFoodBuffs.length >= 2) activeFoodBuffs.shift();
-    activeFoodBuffs.push({ effect, expiresAt: performance.now() / 1000 + effect.duration });
+    activeFoodBuffs.push({ foodId, effect, expiresAt: now + effect.duration });
   }
+
   item.count -= 1;
   if (item.count <= 0) inventoryData[10 + activeHotbarIndex] = null;
   renderUI();
@@ -1335,24 +1385,50 @@ function attackNearestNode() {
   checkInteractions();
 }
 
+function getResourceCollisionData(node: ResourceNode): { x: number; z: number; radius: number } {
+  const box = new THREE.Box3().setFromObject(node.mesh);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const radius = Math.max(
+    node.radius,
+    size.x * 0.5,
+    size.z * 0.5,
+    node.resourceType === 'tree' ? 0.9 : node.resourceType === 'rock' ? 1.1 : 0.6
+  );
+  return { x: center.x, z: center.z, radius };
+}
+
 function resolveObjectCollisions(newX: number, newZ: number): { x: number; z: number } {
   const playerRadius = 0.5;
   let resolvedX = newX;
   let resolvedZ = newZ;
 
-  // 資源との衝突
-  for (const node of resourceNodes) {
-    if (node.resourceType === 'pickup') continue;
-    const dx = resolvedX - node.mesh.position.x;
-    const dz = resolvedZ - node.mesh.position.z;
-    const distSq = dx * dx + dz * dz;
-    const minDist = playerRadius + node.radius;
-    if (distSq < minDist * minDist && distSq > 0.000001) {
-      const dist = Math.sqrt(distSq);
-      const overlap = minDist - dist;
-      resolvedX += (dx / dist) * overlap;
-      resolvedZ += (dz / dist) * overlap;
+  for (let pass = 0; pass < 4; pass++) {
+    let pushed = false;
+
+    for (const node of resourceNodes) {
+      const collision = getResourceCollisionData(node);
+      const dx = resolvedX - collision.x;
+      const dz = resolvedZ - collision.z;
+      const distSq = dx * dx + dz * dz;
+      const minDist = playerRadius + collision.radius;
+
+      if (distSq < minDist * minDist) {
+        if (distSq > 0.000001) {
+          const dist = Math.sqrt(distSq);
+          const overlap = minDist - dist;
+          resolvedX += (dx / dist) * overlap;
+          resolvedZ += (dz / dist) * overlap;
+        } else {
+          const angle = node.mesh.id * 0.61803398875;
+          resolvedX += Math.cos(angle) * minDist;
+          resolvedZ += Math.sin(angle) * minDist;
+        }
+        pushed = true;
+      }
     }
+
+    if (!pushed) break;
   }
 
   // 建築物との衝突。床・天井は上下方向の判定で処理するため、ここでは通行を妨げない。
@@ -1500,6 +1576,53 @@ function createBuildingMesh(id: string): THREE.Mesh {
   return new THREE.Mesh(geometry, material);
 }
 
+function getBuildingPlacementPosition(itemId: string, x: number, z: number, rotationY = buildRotation): THREE.Vector3 {
+  const ground = getTerrainHeightAt(x, z);
+  const support = getBuildingFloorHeight(x, z, ground);
+  const isFloor = itemId.includes('floor');
+  const isCeiling = itemId === 'wooden_ceiling';
+  const isFlatPiece = isFloor || isCeiling;
+  const buildingHeight = itemId.includes('wall') ? 4.5 : (isFlatPiece ? 0.5 : 2);
+  const y = isFloor ? support + 0.25 : (isCeiling ? support + 3.0 : support + buildingHeight / 2);
+  return new THREE.Vector3(x, y, z).setY(y);
+}
+
+function canPlaceSelectedBuildingAt(position: THREE.Vector3, itemId: string, rotationY = buildRotation): boolean {
+  const item = getSelectedHotbarItem();
+  if (!item || item.id !== itemId || item.count <= 0) return false;
+
+  const isFloor = itemId.includes('floor');
+  const ground = getTerrainHeightAt(position.x, position.z);
+
+  if (itemId === 'boat') return ground <= SEA_LEVEL + 0.05;
+  if (ground <= SEA_LEVEL + 0.05) return false;
+
+  const previewMesh = createBuildingMesh(itemId);
+  previewMesh.position.copy(position);
+  previewMesh.rotation.y = rotationY;
+  const previewBox = new THREE.Box3().setFromObject(previewMesh);
+
+  for (const building of placedBuildings) {
+    const existingBox = new THREE.Box3().setFromObject(building.mesh);
+    const horizontalOverlap =
+      previewBox.min.x < existingBox.max.x - 0.05 &&
+      previewBox.max.x > existingBox.min.x + 0.05 &&
+      previewBox.min.z < existingBox.max.z - 0.05 &&
+      previewBox.max.z > existingBox.min.z + 0.05;
+    const verticalOverlap =
+      previewBox.min.y < existingBox.max.y - 0.05 &&
+      previewBox.max.y > existingBox.min.y + 0.05;
+    if (horizontalOverlap && verticalOverlap) return false;
+  }
+
+  if (!isFloor && itemId !== 'wooden_ceiling') {
+    const expectedY = getBuildingFloorHeight(position.x, position.z, ground) + 1;
+    if (Math.abs(position.y - expectedY) > 4.0) return false;
+  }
+
+  return true;
+}
+
 function updateBuildPreview() {
   if (!isBuildMode || !isBuildableSelected()) {
     if (buildPreview) { scene.remove(buildPreview); buildPreview = null; }
@@ -1518,57 +1641,17 @@ function updateBuildPreview() {
   const pos = playerGroup.position.clone().add(forward.multiplyScalar(5));
   const snappedX = Math.round(pos.x / 2) * 2;
   const snappedZ = Math.round(pos.z / 2) * 2;
-  const ground = getTerrainHeightAt(snappedX, snappedZ);
-  const support = getBuildingFloorHeight(snappedX, snappedZ, ground);
-  const isFloor = item.id.includes('floor');
-  const isCeiling = item.id === 'wooden_ceiling';
-  const isFlatPiece = isFloor || isCeiling;
-  const buildingHeight = item.id.includes('wall') ? 4.5 : (isFlatPiece ? 0.5 : 2);
-  const y = isFloor ? support + 0.25 : (isCeiling ? support + 3.0 : support + buildingHeight / 2);
-  buildPreview.position.set(snappedX, y, snappedZ);
+  const previewPosition = getBuildingPlacementPosition(item.id, snappedX, snappedZ, buildRotation);
+  buildPreview.position.copy(previewPosition);
   buildPreview.rotation.y = buildRotation;
 
-  const valid = canPlaceSelectedBuilding();
+  const valid = canPlaceSelectedBuildingAt(previewPosition, item.id, buildRotation);
   (buildPreview.material as THREE.MeshLambertMaterial).opacity = valid ? 0.35 : 0.12;
 }
 
 function canPlaceSelectedBuilding(): boolean {
   if (!buildPreview) return false;
-  const item = getSelectedHotbarItem();
-  if (!item || item.count <= 0) return false;
-
-  const isFloor = item.id.includes('floor');
-  const ground = getTerrainHeightAt(buildPreview.position.x, buildPreview.position.z);
-
-  // ボートだけは海上に置ける。その他の建築物は陸上限定。
-  if (item.id === 'boat') return ground <= SEA_LEVEL + 0.05;
-  if (ground <= SEA_LEVEL + 0.05) return false;
-
-  // 建築物の中心が既存建築物に重なるのを防ぐ。
-  const previewBox = new THREE.Box3().setFromObject(buildPreview);
-  for (const building of placedBuildings) {
-    const existingBox = new THREE.Box3().setFromObject(building.mesh);
-
-    const horizontalOverlap =
-      previewBox.min.x < existingBox.max.x - 0.05 &&
-      previewBox.max.x > existingBox.min.x + 0.05 &&
-      previewBox.min.z < existingBox.max.z - 0.05 &&
-      previewBox.max.z > existingBox.min.z + 0.05;
-
-    const verticalOverlap =
-      previewBox.min.y < existingBox.max.y - 0.05 &&
-      previewBox.max.y > existingBox.min.y + 0.05;
-
-    if (horizontalOverlap && verticalOverlap) return false;
-  }
-
-  // 床以外は地面に置く。既存の建築階層システムはそのまま維持する。
-  if (!isFloor && item.id !== 'wooden_ceiling') {
-    const expectedY = getBuildingFloorHeight(buildPreview.position.x, buildPreview.position.z, ground) + 1;
-    if (Math.abs(buildPreview.position.y - expectedY) > 4.0) return false;
-  }
-
-  return true;
+  return canPlaceSelectedBuildingAt(buildPreview.position.clone(), buildPreview.userData.id as string, buildRotation);
 }
 
 function placeSelectedBuilding() {
@@ -1576,14 +1659,15 @@ function placeSelectedBuilding() {
   const item = getSelectedHotbarItem()!;
   if (!buildPreview || item.count <= 0) return;
 
-  if (!canPlaceSelectedBuilding()) {
+  const placementPosition = buildPreview.position.clone();
+  if (!canPlaceSelectedBuildingAt(placementPosition, item.id, buildRotation)) {
     interactPrompt.style.display = 'block';
     interactPrompt.innerText = 'ここには建築できません';
     return;
   }
 
   const mesh = createBuildingMesh(item.id);
-  mesh.position.copy(buildPreview.position);
+  mesh.position.copy(placementPosition);
   mesh.rotation.copy(buildPreview.rotation);
   (mesh.material as THREE.MeshLambertMaterial).opacity = 1;
   scene.add(mesh);
@@ -2028,13 +2112,11 @@ function animate() {
 function loadWoodModel(): Promise<void> {
   return new Promise((resolve) => {
     gltfLoader.load(
-      '/wood1.glb',
+      MODEL_PATHS.wood,
       (gltf) => {
         woodModelTemplate = gltf.scene;
         woodModelTemplate.userData.sharedAsset = true;
 
-        // Blender側の大きさが多少違っていても、ゲーム内では従来の木と同程度の
-        // 高さ（約15）になるように自動調整する。
         const box = new THREE.Box3().setFromObject(woodModelTemplate);
         const height = box.max.y - box.min.y;
         if (height > 0.001) {
@@ -2045,7 +2127,7 @@ function loadWoodModel(): Promise<void> {
       },
       undefined,
       (error) => {
-        console.error('wood1.glbの読み込みに失敗しました。従来の木モデルを使用します。', error);
+        console.error(`${MODEL_PATHS.wood} の読み込みに失敗しました。従来の木モデルを使用します。`, error);
         woodModelTemplate = null;
         resolve();
       }
@@ -2056,13 +2138,11 @@ function loadWoodModel(): Promise<void> {
 function loadRockModel(): Promise<void> {
   return new Promise((resolve) => {
     gltfLoader.load(
-      '/stone2.glb',
+      MODEL_PATHS.stone,
       (gltf) => {
         rockModelTemplate = gltf.scene;
         rockModelTemplate.userData.sharedAsset = true;
 
-        // Blender側の大きさが違っていても、ゲーム内では従来の岩と同程度の
-        // 高さ（約2.4）になるように自動調整する。
         const box = new THREE.Box3().setFromObject(rockModelTemplate);
         const height = box.max.y - box.min.y;
         if (height > 0.001) {
@@ -2073,7 +2153,7 @@ function loadRockModel(): Promise<void> {
       },
       undefined,
       (error) => {
-        console.error('stone1.glbの読み込みに失敗しました。従来の岩モデルを使用します。', error);
+        console.error(`${MODEL_PATHS.stone} の読み込みに失敗しました。従来の岩モデルを使用します。`, error);
         rockModelTemplate = null;
         resolve();
       }
@@ -2081,28 +2161,19 @@ function loadRockModel(): Promise<void> {
   });
 }
 
-function loadPickupModel(
-  path: string,
-  targetHeight: number,
-  label: string,
-  setTemplate: (template: THREE.Group | null) => void
-): Promise<void> {
+function loadBerryModel(): Promise<void> {
   return new Promise((resolve) => {
     gltfLoader.load(
-      path,
+      MODEL_PATHS.berry,
       (gltf) => {
-        const template = gltf.scene;
-        template.userData.sharedAsset = true;
-        const box = new THREE.Box3().setFromObject(template);
-        const height = box.max.y - box.min.y;
-        if (height > 0.001) template.scale.setScalar(targetHeight / height);
-        setTemplate(template);
+        berryModelTemplate = gltf.scene;
+        berryModelTemplate.userData.sharedAsset = true;
         resolve();
       },
       undefined,
       (error) => {
-        console.warn(`${label} の読み込みに失敗しました。従来のモデルを使用します。`, error);
-        setTemplate(null);
+        console.warn(`${MODEL_PATHS.berry} の読み込みに失敗しました。従来のベリーモデルを使用します。`, error);
+        berryModelTemplate = null;
         resolve();
       }
     );
@@ -2110,21 +2181,28 @@ function loadPickupModel(
 }
 
 function loadLeafModel(): Promise<void> {
-  return loadPickupModel('/leaf1.glb', 1.2, 'leaf1.glb', (template) => {
-    leafModelTemplate = template;
-  });
-}
-
-function loadBerryModel(): Promise<void> {
-  return loadPickupModel('/berry1.glb', 1.1, 'berry1.glb', (template) => {
-    berryModelTemplate = template;
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      MODEL_PATHS.leaf,
+      (gltf) => {
+        leafModelTemplate = gltf.scene;
+        leafModelTemplate.userData.sharedAsset = true;
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.warn(`${MODEL_PATHS.leaf} の読み込みに失敗しました。従来の葉モデルを使用します。`, error);
+        leafModelTemplate = null;
+        resolve();
+      }
+    );
   });
 }
 
 async function loadGroundModel(): Promise<void> {
   return new Promise((resolve) => {
     gltfLoader.load(
-      '/groud1.glb',
+      MODEL_PATHS.ground,
       (gltf) => {
         groundModelTemplate = gltf.scene;
         groundModelTemplate.userData.sharedAsset = true;
@@ -2132,7 +2210,7 @@ async function loadGroundModel(): Promise<void> {
       },
       undefined,
       (error) => {
-        console.warn('groud1.glb の読み込みに失敗しました。元の地形を使用します。', error);
+        console.warn(`${MODEL_PATHS.ground} の読み込みに失敗しました。元の地形を使用します。`, error);
         groundModelTemplate = null;
         resolve();
       }
@@ -2181,16 +2259,23 @@ function addBlenderGround(): void {
 }
 
 async function initializeGame() {
+  if (gameInitialized) return;
+  gameInitialized = true;
+
   // Blender製モデルを先に読み込む。groud1.glbがある場合は、Green Islandの旧地面を使わない。
-  await Promise.all([loadWoodModel(), loadRockModel(), loadLeafModel(), loadBerryModel(), loadGroundModel()]);
+  await Promise.all([
+    loadWoodModel(),
+    loadRockModel(),
+    loadGroundModel(),
+    loadBerryModel(),
+    loadLeafModel(),
+  ]);
 
   addBlenderGround();
 
-  // Green Islandだけ旧プロシージャル地面を除外し、残り4島は従来地形を維持する。
   proceduralTerrainMesh = buildTerrainMesh(!!blenderGroundRoot);
   scene.add(proceduralTerrainMesh);
 
-  // GLBの実際の高さを使ってプレイヤーの初期位置も合わせる。
   playerGroup.position.y = getTerrainHeightAt(playerGroup.position.x, playerGroup.position.z);
 
   spawnAllIslandResources();
@@ -2200,4 +2285,12 @@ async function initializeGame() {
   animate();
 }
 
-initializeGame();
+const startScreen = document.getElementById('start-screen')!;
+const startButton = document.getElementById('start-button')!;
+let gameInitialized = false;
+
+startButton.addEventListener('click', () => {
+  startScreen.classList.add('hidden');
+  initializeGame();
+  document.body.requestPointerLock();
+});
