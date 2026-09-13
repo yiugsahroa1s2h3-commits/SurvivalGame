@@ -81,6 +81,14 @@ const islands: IslandData[] = islandBases.map((b) => ({
   harmonics: makeHarmonics(hashStringToSeed(b.name)),
 }));
 
+// Blender製のGreen Island。読み込み後は見た目と当たり判定の基準にする。
+let blenderGroundRoot: THREE.Object3D | null = null;
+const blenderGroundBounds = new THREE.Box3();
+const blenderGroundRaycaster = new THREE.Raycaster();
+const blenderGroundRayOrigin = new THREE.Vector3();
+const blenderGroundRayDirection = new THREE.Vector3(0, -1, 0);
+let proceduralTerrainMesh: THREE.Mesh | null = null;
+
 // 角度(ラジアン)ごとに、その方向の海岸線までの半径を返す（いびつな海岸線の本体）
 function getIslandRadiusAt(isl: IslandData, angle: number): number {
   let mod = 0;
@@ -100,6 +108,21 @@ function getEdgeWidth(isl: IslandData): number {
 
 // 地形の高さ関数（見た目のメッシュも、当たり判定も、現在地判定も、この関数系だけを使う）
 function getTerrainHeightAt(x: number, z: number): number {
+  // Green IslandにBlender地面がある場合は、GLBそのものをレイキャストして高さを取る。
+  // これにより「見た目はGLB、当たり判定は古い地形」というズレを防ぐ。
+  if (blenderGroundRoot) {
+    const min = blenderGroundBounds.min;
+    const max = blenderGroundBounds.max;
+    const margin = 1;
+    if (x >= min.x - margin && x <= max.x + margin && z >= min.z - margin && z <= max.z + margin) {
+      blenderGroundRayOrigin.set(x, max.y + 50, z);
+      blenderGroundRaycaster.set(blenderGroundRayOrigin, blenderGroundRayDirection);
+      const hits = blenderGroundRaycaster.intersectObject(blenderGroundRoot, true);
+      if (hits.length > 0) return hits[0].point.y;
+    }
+  }
+
+  // Blender地面がない島は従来のプロシージャル地形を使う。
   let maxHeight = 0;
   for (const isl of islands) {
     const dx = x - isl.x;
@@ -133,7 +156,7 @@ function getCurrentIslandName(x: number, z: number): string {
 }
 
 // 見た目の地形メッシュを高さマップから生成（当たり判定と完全一致させる）
-function buildTerrainMesh(): THREE.Mesh {
+function buildTerrainMesh(excludeGreenIsland = false): THREE.Mesh {
   const size = 2200;
   const segments = 160;
   const geo = new THREE.PlaneGeometry(size, size, segments, segments);
@@ -143,29 +166,56 @@ function buildTerrainMesh(): THREE.Mesh {
   const colors: number[] = [];
   const tempColor = new THREE.Color();
   const seaFloorColor = new THREE.Color(0x0b3d63);
+  const greenIsland = islands[0];
 
   for (let i = 0; i < posAttr.count; i++) {
     const x = posAttr.getX(i);
     const z = posAttr.getZ(i);
-    const h = getTerrainHeightAt(x, z);
-    posAttr.setY(i, h);
 
+    let h = getTerrainHeightAt(x, z);
     let bestColor = seaFloorColor;
     let bestHeight = 0;
-    for (const isl of islands) {
-      const dx = x - isl.x;
-      const dz = z - isl.z;
+
+    // groud1.glbを使う場合、旧Green Islandの地面は完全に非表示にする。
+    // ここを残すと「古い地面＋Blender地面」が重なってしまう。
+    let insideBlenderGreenArea = false;
+    if (excludeGreenIsland) {
+      const dx = x - greenIsland.x;
+      const dz = z - greenIsland.z;
       const dist = Math.hypot(dx, dz);
       const angle = Math.atan2(dz, dx);
-      const localRadius = getIslandRadiusAt(isl, angle);
-      const edge = getEdgeWidth(isl);
-      if (dist <= localRadius + edge) {
-        let hh = 0;
-        if (dist <= localRadius - edge) hh = isl.height;
-        else hh = isl.height * (1 - (dist - (localRadius - edge)) / (edge * 2));
-        if (hh > bestHeight) { bestHeight = hh; tempColor.setHex(isl.color); bestColor = tempColor.clone(); }
+      const localRadius = getIslandRadiusAt(greenIsland, angle);
+      const edge = getEdgeWidth(greenIsland);
+      insideBlenderGreenArea = dist <= localRadius + edge;
+      if (insideBlenderGreenArea) {
+        h = SEA_LEVEL;
       }
     }
+
+    posAttr.setY(i, h);
+
+    if (!insideBlenderGreenArea) {
+      for (const isl of islands) {
+        if (excludeGreenIsland && isl.name === 'グリーンアイランド') continue;
+        const dx = x - isl.x;
+        const dz = z - isl.z;
+        const dist = Math.hypot(dx, dz);
+        const angle = Math.atan2(dz, dx);
+        const localRadius = getIslandRadiusAt(isl, angle);
+        const edge = getEdgeWidth(isl);
+        if (dist <= localRadius + edge) {
+          let hh = 0;
+          if (dist <= localRadius - edge) hh = isl.height;
+          else hh = isl.height * (1 - (dist - (localRadius - edge)) / (edge * 2));
+          if (hh > bestHeight) {
+            bestHeight = hh;
+            tempColor.setHex(isl.color);
+            bestColor = tempColor.clone();
+          }
+        }
+      }
+    }
+
     colors.push(bestColor.r, bestColor.g, bestColor.b);
   }
 
@@ -176,7 +226,6 @@ function buildTerrainMesh(): THREE.Mesh {
   return new THREE.Mesh(geo, mat);
 }
 
-scene.add(buildTerrainMesh());
 
 // --- 4. プレイヤー（頭・胴体・両手・両足） ---
 const playerGroup = new THREE.Group();
@@ -419,6 +468,7 @@ const resourceNodes: ResourceNode[] = [];
 const gltfLoader = new GLTFLoader();
 let woodModelTemplate: THREE.Group | null = null;
 let rockModelTemplate: THREE.Group | null = null;
+let groundModelTemplate: THREE.Group | null = null;
 
 const treeDurability: Record<ResourceNode['resourceSize'], number> = {
   small: 50,
@@ -524,13 +574,13 @@ function createRockResource(
     const group = rockModelTemplate.clone(true);
     group.scale.multiplyScalar(sizeScale);
 
-    // rock1.glbの原点が岩の中心などになっていても、岩の底面が地面に接するように補正する。
+    // stone1.glbの原点が岩の中心などになっていても、岩の底面が地面に接するように補正する。
     const box = new THREE.Box3().setFromObject(group);
     const minY = box.min.y;
     group.position.set(x, groundY - minY, z);
     mesh = group;
   } else {
-    // rock1.glbが読み込めなかった場合の従来モデル。
+    // stone1.glbが読み込めなかった場合の従来モデル。
     const fallback = new THREE.Mesh(
       new THREE.DodecahedronGeometry(1.2 * sizeScale, 1),
       new THREE.MeshLambertMaterial({ color: 0x708090 })
@@ -678,7 +728,7 @@ function spawnIslandResources(
 // スゥイート：木・石は少なめ、食料系を多めにする。
 function spawnAllIslandResources() {
   // グリーンアイランド：草地を中心に、木・石・葉・粘土・食料を幅広く大量配置。
-  spawnIslandResources(islands[0], 90, 60, { leaf: 320, clay: 70, berry: 60, mushroom: 30, high_grade_wood: 8 });
+  spawnIslandResources(islands[0], 45, 30, { leaf: 140, clay: 35, berry: 30, mushroom: 15, high_grade_wood: 4 });
   // フォレストアイランド：木を圧倒的に多く、葉も大量。
   spawnIslandResources(islands[1], 240, 35, { leaf: 700, berry: 80, mushroom: 80, clay: 50, high_grade_wood: 40 });
   // オールドシティアイランド：木・石は少なめ、鉄の破片と粘土を大量配置。
@@ -1871,7 +1921,7 @@ function loadRockModel(): Promise<void> {
       },
       undefined,
       (error) => {
-        console.error('rock1.glbの読み込みに失敗しました。従来の岩モデルを使用します。', error);
+        console.error('stone1.glbの読み込みに失敗しました。従来の岩モデルを使用します。', error);
         rockModelTemplate = null;
         resolve();
       }
@@ -1879,10 +1929,78 @@ function loadRockModel(): Promise<void> {
   });
 }
 
+async function loadGroundModel(): Promise<void> {
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      '/groud1.glb',
+      (gltf) => {
+        groundModelTemplate = gltf.scene;
+        groundModelTemplate.userData.sharedAsset = true;
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.warn('groud1.glb の読み込みに失敗しました。元の地形を使用します。', error);
+        groundModelTemplate = null;
+        resolve();
+      }
+    );
+  });
+}
+
+function addBlenderGround(): void {
+  if (!groundModelTemplate) return;
+
+  const greenIsland = islands[0];
+  const ground = groundModelTemplate.clone(true);
+  ground.name = 'BlenderGround';
+
+  // groud1.glbの実測サイズは約40×40なので、Green Islandの直径544に合わせる。
+  // X/Zだけを拡大し、Y方向の起伏はそのまま残す。
+  const originalBox = new THREE.Box3().setFromObject(ground);
+  const originalSize = originalBox.getSize(new THREE.Vector3());
+  const horizontalSize = Math.max(originalSize.x, originalSize.z);
+  if (horizontalSize > 0.001) {
+    const horizontalScale = (greenIsland.radius * 2) / horizontalSize;
+    ground.scale.x *= horizontalScale;
+    ground.scale.y *= 4.0;
+    ground.scale.z *= horizontalScale;
+  }
+
+  // X/Zの中心をGreen Islandの中心(0,0)へ合わせ、最低点を海面へ置く。
+  const box = new THREE.Box3().setFromObject(ground);
+  const center = box.getCenter(new THREE.Vector3());
+  ground.position.x += greenIsland.x - center.x;
+  ground.position.z += greenIsland.z - center.z;
+  ground.position.y += SEA_LEVEL - box.min.y-132;
+
+  ground.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.isMesh) {
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      mesh.userData.blenderGround = true;
+    }
+  });
+
+  scene.add(ground);
+  blenderGroundRoot = ground;
+  blenderGroundBounds.setFromObject(ground);
+}
+
 async function initializeGame() {
-  // Blender製の木・岩モデルを先に読み込んでから資源を生成する。
-  // どちらかの読み込みに失敗してもゲーム自体は開始できるようにする。
-  await Promise.all([loadWoodModel(), loadRockModel()]);
+  // Blender製モデルを先に読み込む。groud1.glbがある場合は、Green Islandの旧地面を使わない。
+  await Promise.all([loadWoodModel(), loadRockModel(), loadGroundModel()]);
+
+  addBlenderGround();
+
+  // Green Islandだけ旧プロシージャル地面を除外し、残り4島は従来地形を維持する。
+  proceduralTerrainMesh = buildTerrainMesh(!!blenderGroundRoot);
+  scene.add(proceduralTerrainMesh);
+
+  // GLBの実際の高さを使ってプレイヤーの初期位置も合わせる。
+  playerGroup.position.y = getTerrainHeightAt(playerGroup.position.x, playerGroup.position.z);
+
   spawnAllIslandResources();
   rebuildResourceHitObjects();
   updateUI();
