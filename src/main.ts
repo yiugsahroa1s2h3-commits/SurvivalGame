@@ -1094,7 +1094,23 @@ function renderUI() {
     const slot = document.createElement('div');
     slot.className = 'inventory-slot';
     if (index >= 10) slot.classList.add('hotbar-linked');
-    if (item) { slot.innerText = `${item.name}\nx${item.count}`; slot.draggable = true; }
+    if (item) {
+      const image = document.createElement('img');
+      image.src = `/resources/${encodeURIComponent(item.name)}.png`;
+      image.alt = item.name;
+      image.title = item.name;
+
+      const name = document.createElement('span');
+      name.className = 'inventory-name';
+      name.innerText = item.name;
+
+      const count = document.createElement('span');
+      count.className = 'inventory-count';
+      count.innerText = `x${item.count}`;
+
+      slot.append(image, name, count);
+      slot.draggable = true;
+    }
 
     slot.addEventListener('dragstart', () => (draggedIndex = index));
     slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.classList.add('drag-over'); });
