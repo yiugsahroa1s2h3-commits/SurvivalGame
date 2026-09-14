@@ -21,7 +21,7 @@ scene.add(new THREE.AmbientLight(0x707070));
 
 // 3. 海
 const oceanGeo = new THREE.PlaneGeometry(3000, 3000);
-const oceanMat = new THREE.MeshLambertMaterial({ color: 0x1e90ff });
+const oceanMat = new THREE.MeshBasicMaterial({ color: 0x1e90ff });
 const ocean = new THREE.Mesh(oceanGeo, oceanMat);
 ocean.rotation.x = -Math.PI / 2;
 const SEA_LEVEL = 0;
@@ -81,9 +81,14 @@ const islands: IslandData[] = islandBases.map((b) => ({
   harmonics: makeHarmonics(hashStringToSeed(b.name)),
 }));
 
-// Blender製のGreen Island。読み込み後は見た目と当たり判定の基準にする。
-let blenderGroundRoot: THREE.Object3D | null = null;
-const blenderGroundBounds = new THREE.Box3();
+// Blender製地形。読み込み後は見た目と当たり判定の基準にする。
+interface BlenderGround {
+  root: THREE.Object3D;
+  bounds: THREE.Box3;
+  islandName: string;
+}
+
+const blenderGrounds: BlenderGround[] = [];
 const blenderGroundRaycaster = new THREE.Raycaster();
 const blenderGroundRayOrigin = new THREE.Vector3();
 const blenderGroundRayDirection = new THREE.Vector3(0, -1, 0);
@@ -108,16 +113,16 @@ function getEdgeWidth(isl: IslandData): number {
 
 // 地形の高さ関数（見た目のメッシュも、当たり判定も、現在地判定も、この関数系だけを使う）
 function getTerrainHeightAt(x: number, z: number): number {
-  // Green IslandにBlender地面がある場合は、GLBそのものをレイキャストして高さを取る。
+  // Blender地面がある場合は、GLBそのものをレイキャストして高さを取る。
   // これにより「見た目はGLB、当たり判定は古い地形」というズレを防ぐ。
-  if (blenderGroundRoot) {
-    const min = blenderGroundBounds.min;
-    const max = blenderGroundBounds.max;
+  for (const blenderGround of blenderGrounds) {
+    const min = blenderGround.bounds.min;
+    const max = blenderGround.bounds.max;
     const margin = 1;
     if (x >= min.x - margin && x <= max.x + margin && z >= min.z - margin && z <= max.z + margin) {
       blenderGroundRayOrigin.set(x, max.y + 50, z);
       blenderGroundRaycaster.set(blenderGroundRayOrigin, blenderGroundRayDirection);
-      const hits = blenderGroundRaycaster.intersectObject(blenderGroundRoot, true);
+      const hits = blenderGroundRaycaster.intersectObject(blenderGround.root, true);
       if (hits.length > 0) return hits[0].point.y;
     }
   }
@@ -170,7 +175,6 @@ function buildTerrainMesh(excludeGreenIsland = false): THREE.Mesh {
   const colors: number[] = [];
   const tempColor = new THREE.Color();
   const seaFloorColor = new THREE.Color(0x0b3d63);
-  const greenIsland = islands[0];
 
   for (let i = 0; i < posAttr.count; i++) {
     const x = posAttr.getX(i);
@@ -180,27 +184,32 @@ function buildTerrainMesh(excludeGreenIsland = false): THREE.Mesh {
     let bestColor = seaFloorColor;
     let bestHeight = 0;
 
-    // groud1.glbを使う場合、旧Green Islandの地面は完全に非表示にする。
-    // ここを残すと「古い地面＋Blender地面」が重なってしまう。
+    // Blender地面を使う島の旧プロシージャル地面は完全に非表示にする。
     let insideBlenderGreenArea = false;
     if (excludeGreenIsland) {
-      const dx = x - greenIsland.x;
-      const dz = z - greenIsland.z;
-      const dist = Math.hypot(dx, dz);
-      const angle = Math.atan2(dz, dx);
-      const localRadius = getIslandRadiusAt(greenIsland, angle);
-      const edge = getEdgeWidth(greenIsland);
-      insideBlenderGreenArea = dist <= localRadius + edge;
-      if (insideBlenderGreenArea) {
-        h = SEA_LEVEL;
+      for (const blenderGround of blenderGrounds) {
+        const island = islands.find((candidate) => candidate.name === blenderGround.islandName);
+        if (!island) continue;
+        const dx = x - island.x;
+        const dz = z - island.z;
+        const dist = Math.hypot(dx, dz);
+        const angle = Math.atan2(dz, dx);
+        const localRadius = getIslandRadiusAt(island, angle);
+        const edge = getEdgeWidth(island);
+        if (dist <= localRadius + edge) {
+          insideBlenderGreenArea = true;
+          h = SEA_LEVEL;
+          break;
+        }
       }
     }
 
-    posAttr.setY(i, h);
+    // 海底を海面より下げ、海面メッシュとの重なりによるちらつきを防ぐ。
+    posAttr.setY(i, h <= SEA_LEVEL ? SEA_LEVEL - 2 : h);
 
     if (!insideBlenderGreenArea) {
       for (const isl of islands) {
-        if (excludeGreenIsland && isl.name === 'グリーンアイランド') continue;
+        if (excludeGreenIsland && blenderGrounds.some((ground) => ground.islandName === isl.name)) continue;
         const dx = x - isl.x;
         const dz = z - isl.z;
         const dist = Math.hypot(dx, dz);
@@ -240,68 +249,6 @@ async function smoothLoadingProgressTo(target: number, status: string): Promise<
     await waitForNextFrame();
   }
 }
-
-async function addGrass(): Promise<void> {
-  const grassGeometry = new THREE.ConeGeometry(0.16, 0.28, 3);
-  grassGeometry.translate(0, 0.14, 0);
-
-  const coastalMargin = 24;
-  const gridSpacing = 3.5;
-  const dummy = new THREE.Object3D();
-
-  for (const [islandIndex, isl] of islands.entries()) {
-    const grassColor = new THREE.Color(isl.color).multiplyScalar(0.72);
-    const positions: Array<{ x: number; z: number; groundY: number }> = [];
-    const scanRadius = isl.radius + 4;
-    const totalRows = Math.ceil((scanRadius * 2) / gridSpacing) + 1;
-    let rowIndex = 0;
-
-    for (let x = isl.x - scanRadius; x <= isl.x + scanRadius; x += gridSpacing) {
-      for (let z = isl.z - scanRadius; z <= isl.z + scanRadius; z += gridSpacing) {
-        const dx = x - isl.x;
-        const dz = z - isl.z;
-        const angle = Math.atan2(dz, dx);
-        const inlandRadius = getIslandRadiusAt(isl, angle) - coastalMargin;
-        if (Math.hypot(dx, dz) > inlandRadius) continue;
-
-        const groundY = islandIndex === 0 && blenderGroundRoot
-          ? getTerrainHeightAt(x, z)
-          : isl.height;
-        if (groundY >= isl.height - 0.5) positions.push({ x, z, groundY });
-      }
-
-      rowIndex++;
-      if (rowIndex % 6 === 0) {
-        const grassProgress = 68 + ((islandIndex + rowIndex / totalRows) / islands.length) * 15;
-        setLoadingProgress(grassProgress, '草原を作っています');
-        await waitForNextFrame();
-      }
-    }
-
-    const grassMaterial = new THREE.MeshLambertMaterial({ color: grassColor });
-    const grass = new THREE.InstancedMesh(grassGeometry, grassMaterial, positions.length);
-    grass.name = `${isl.name}の草`;
-    grass.castShadow = false;
-    grass.receiveShadow = true;
-
-    for (let index = 0; index < positions.length; index++) {
-      const point = positions[index];
-      dummy.position.set(point.x, point.groundY, point.z);
-      dummy.rotation.y = Math.random() * Math.PI * 2;
-      const scale = 0.8 + Math.random() * 0.35;
-      dummy.scale.set(scale, 0.7 + Math.random() * 0.4, scale);
-      dummy.updateMatrix();
-      grass.setMatrixAt(index, dummy.matrix);
-      if ((index + 1) % 3000 === 0) await waitForNextFrame();
-    }
-
-    grass.instanceMatrix.needsUpdate = true;
-    scene.add(grass);
-    setLoadingProgress(68 + (islandIndex + 1) * 3, '草原を作っています');
-    await waitForNextFrame();
-  }
-}
-
 
 // --- 4. プレイヤー（頭・胴体・両手・両足） ---
 const playerGroup = new THREE.Group();
@@ -517,6 +464,9 @@ interface ResourceNode {
   resourceType: 'tree' | 'rock' | 'pickup';
   resourceSize: 'small' | 'normal' | 'large';
   islandName: string;
+  spawnX: number;
+  spawnZ: number;
+  spawnGroundY: number;
   collisionCenterX?: number;
   collisionCenterZ?: number;
 }
@@ -540,6 +490,7 @@ const weaponStats: Record<string, WeaponStats> = {
 };
 
 const resourceNodes: ResourceNode[] = [];
+const RESOURCE_RESPAWN_MS = 5 * 60 * 1000;
 
 // Blenderで作成した木モデル（public/wood1.glb）を共有して使う。
 // すべての木で同じジオメトリを共有することで、木が大量にあっても無駄な読み込みを避ける。
@@ -550,12 +501,16 @@ const MODEL_PATHS = {
   berry: '/berry1.glb',
   leaf: '/leaf1.glb',
   ground: '/groud1.glb',
+  mountainGround: '/MountainIsland_groud1.glb',
+  sweetGround: '/SweetIsland_groud1.glb',
 } as const;
 let woodModelTemplate: THREE.Group | null = null;
 let rockModelTemplate: THREE.Group | null = null;
 let groundModelTemplate: THREE.Group | null = null;
 let berryModelTemplate: THREE.Group | null = null;
 let leafModelTemplate: THREE.Group | null = null;
+let mountainGroundModelTemplate: THREE.Group | null = null;
+let sweetGroundModelTemplate: THREE.Group | null = null;
 
 const treeDurability: Record<ResourceNode['resourceSize'], number> = {
   small: 50,
@@ -610,9 +565,6 @@ function createTreeResource(
   if (woodModelTemplate) {
     group = woodModelTemplate.clone(true);
     group.scale.multiplyScalar(sizeScale);
-
-    // Blender側の原点が木の根元からずれていても、地面に接するように補正する。
-    placeObjectOnGround(group, x, z, groundY);
   } else {
     group = new THREE.Group();
 
@@ -630,8 +582,10 @@ function createTreeResource(
     leaves.position.y = 9 * sizeScale;
     group.add(leaves);
 
-    placeObjectOnGround(group, x, z, groundY);
   }
+
+  // Blenderモデルと簡易モデルのどちらも、実際の地形面に接地させる。
+  placeObjectOnGround(group, x, z, groundY);
 
   scene.add(group);
 
@@ -648,6 +602,9 @@ function createTreeResource(
     resourceType: 'tree',
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
+    spawnX: x,
+    spawnZ: z,
+    spawnGroundY: groundY,
   };
   group.traverse((child) => { child.userData.resourceNode = node; });
   return node;
@@ -694,6 +651,9 @@ function createRockResource(
     resourceType: 'rock',
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
+    spawnX: x,
+    spawnZ: z,
+    spawnGroundY: groundY,
   };
   mesh.traverse((child) => { child.userData.resourceNode = node; });
   return node;
@@ -801,6 +761,9 @@ function createPickupResource(
     resourceType: 'pickup',
     resourceSize: 'small',
     islandName,
+    spawnX: x,
+    spawnZ: z,
+    spawnGroundY: groundY,
   };
   mesh.traverse((child) => { child.userData.resourceNode = node; });
   return node;
@@ -815,9 +778,60 @@ function randomPointOnIsland(isl: IslandData, margin: number): { x: number; z: n
     const x = isl.x + Math.cos(angle) * r;
     const z = isl.z + Math.sin(angle) * r;
     const groundY = getTerrainHeightAt(x, z);
-    if (groundY >= isl.height - 0.5) return { x, z, groundY };
+    if (
+      groundY > SEA_LEVEL + 0.05 &&
+      groundY >= isl.height - 0.5 &&
+      getCurrentIslandName(x, z) === isl.name &&
+      !isWaterAt(x, z)
+    ) {
+      return { x, z, groundY };
+    }
   }
   return null;
+}
+
+function scheduleResourceRespawn(node: ResourceNode): void {
+  const island = islands.find((candidate) => candidate.name === node.islandName);
+  if (!island) return;
+
+  window.setTimeout(() => {
+    let x = node.spawnX;
+    let z = node.spawnZ;
+    let groundY = getTerrainHeightAt(x, z);
+
+    if (
+      groundY <= SEA_LEVEL + 0.05 ||
+      getCurrentIslandName(x, z) !== island.name ||
+      isWaterAt(x, z)
+    ) {
+      const point = randomPointOnIsland(island, node.resourceType === 'tree' ? 15 : 8);
+      if (!point) return;
+      x = point.x;
+      z = point.z;
+      groundY = point.groundY;
+    }
+
+    let respawnedNode: ResourceNode;
+    if (node.resourceType === 'tree') {
+      respawnedNode = createTreeResource(x, groundY, z, node.resourceSize);
+    } else if (node.resourceType === 'rock') {
+      respawnedNode = createRockResource(x, groundY, z, node.resourceSize);
+    } else {
+      respawnedNode = createPickupResource(
+        x,
+        groundY,
+        z,
+        node.itemId,
+        node.itemName,
+        node.yieldCount,
+        island.name
+      );
+    }
+
+    respawnedNode.islandName = island.name;
+    resourceNodes.push(respawnedNode);
+    rebuildResourceHitObjects();
+  }, RESOURCE_RESPAWN_MS);
 }
 
 async function spawnIslandResources(
@@ -1269,6 +1283,7 @@ let isMapOpen = false;
 const mapModal = document.getElementById('map-modal')!;
 const mapCanvas = document.getElementById('map-canvas') as HTMLCanvasElement;
 const mapCtx = mapCanvas.getContext('2d')!;
+let mapTerrainCache: HTMLCanvasElement | null = null;
 
 function toggleMap() {
   isMapOpen = !isMapOpen;
@@ -1283,24 +1298,89 @@ function toggleMap() {
   }
 }
 
-// いびつな海岸線をそのままミニマップにも描画する
-function drawIslandShape(
-  isl: IslandData,
-  toMapX: (x: number) => number,
-  toMapZ: (z: number) => number
-) {
-  const segments = 64;
-  mapCtx.beginPath();
-  for (let i = 0; i <= segments; i++) {
-    const angle = (i / segments) * Math.PI * 2;
-    const r = getIslandRadiusAt(isl, angle);
-    const x = isl.x + Math.cos(angle) * r;
-    const z = isl.z + Math.sin(angle) * r;
-    const mx = toMapX(x);
-    const mz = toMapZ(z);
-    if (i === 0) mapCtx.moveTo(mx, mz); else mapCtx.lineTo(mx, mz);
+function getMapLandColor(x: number, z: number): string {
+  let nearestIsland = islands[0];
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const island of islands) {
+    const distance = Math.hypot(x - island.x, z - island.z);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIsland = island;
+    }
   }
-  mapCtx.closePath();
+  return `#${nearestIsland.color.toString(16).padStart(6, '0')}`;
+}
+
+function getMapSkyColor(): string {
+  const background = scene.background;
+  if (background instanceof THREE.Color) return `#${background.getHexString()}`;
+  return '#87ceeb';
+}
+
+function buildMapTerrainCache(
+  worldRange: number
+): HTMLCanvasElement {
+  const cache = document.createElement('canvas');
+  const cacheWidth = 220;
+  const cacheHeight = 220;
+  cache.width = cacheWidth;
+  cache.height = cacheHeight;
+  const cacheCtx = cache.getContext('2d')!;
+  cacheCtx.fillStyle = getMapSkyColor();
+  cacheCtx.fillRect(0, 0, cacheWidth, cacheHeight);
+
+  const worldMin = -worldRange;
+  const worldSize = worldRange * 2;
+  const cellWorldSize = worldSize / cacheWidth;
+  for (let row = 0; row < cacheHeight; row++) {
+    for (let column = 0; column < cacheWidth; column++) {
+      const x = worldMin + (column + 0.5) * cellWorldSize;
+      const z = worldMin + (row + 0.5) * (worldSize / cacheHeight);
+      if (getTerrainHeightAt(x, z) <= SEA_LEVEL + 0.05) continue;
+
+      cacheCtx.fillStyle = getMapLandColor(x, z);
+      cacheCtx.fillRect(column, row, 1.1, 1.1);
+    }
+  }
+
+  return cache;
+}
+
+function drawMapGrid(xOffset: number, yOffset: number, size: number): void {
+  const columns = 12;
+  const rows = 12;
+  const cellWidth = size / columns;
+  const cellHeight = size / rows;
+  const letters = 'ABCDEFGHIJKL';
+
+  mapCtx.save();
+  mapCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+  mapCtx.lineWidth = 1;
+  mapCtx.font = '12px sans-serif';
+  mapCtx.textAlign = 'center';
+  mapCtx.textBaseline = 'top';
+  mapCtx.fillStyle = 'rgba(255,255,255,0.9)';
+
+  for (let column = 0; column <= columns; column++) {
+    const x = xOffset + column * cellWidth + 0.5;
+    mapCtx.beginPath();
+    mapCtx.moveTo(x, yOffset);
+    mapCtx.lineTo(x, yOffset + size);
+    mapCtx.stroke();
+    if (column < columns) mapCtx.fillText(letters[column], xOffset + column * cellWidth + cellWidth / 2, yOffset + 4);
+  }
+
+  mapCtx.textAlign = 'left';
+  mapCtx.textBaseline = 'middle';
+  for (let row = 0; row <= rows; row++) {
+    const y = yOffset + row * cellHeight + 0.5;
+    mapCtx.beginPath();
+    mapCtx.moveTo(xOffset, y);
+    mapCtx.lineTo(xOffset + size, y);
+    mapCtx.stroke();
+    if (row < rows) mapCtx.fillText(String(row + 1), xOffset + 4, yOffset + row * cellHeight + cellHeight / 2);
+  }
+  mapCtx.restore();
 }
 
 function drawMap() {
@@ -1309,17 +1389,21 @@ function drawMap() {
   mapCtx.clearRect(0, 0, w, h);
 
   const worldRange = 1050; // 主要5島＋海域を収める表示範囲
-  const scale = Math.min(w, h) / (worldRange * 2);
-  const toMapX = (x: number) => w / 2 + x * scale;
-  const toMapZ = (z: number) => h / 2 + z * scale;
+  const mapSize = Math.min(w, h);
+  const mapX = (w - mapSize) / 2;
+  const mapY = (h - mapSize) / 2;
+  const scale = mapSize / (worldRange * 2);
+  const toMapX = (x: number) => mapX + mapSize / 2 + x * scale;
+  const toMapZ = (z: number) => mapY + mapSize / 2 + z * scale;
+
+  if (!mapTerrainCache) mapTerrainCache = buildMapTerrainCache(worldRange);
+  mapCtx.imageSmoothingEnabled = true;
+  mapCtx.fillStyle = getMapSkyColor();
+  mapCtx.fillRect(0, 0, w, h);
+  mapCtx.drawImage(mapTerrainCache, mapX, mapY, mapSize, mapSize);
+  drawMapGrid(mapX, mapY, mapSize);
 
   islands.forEach((isl) => {
-    drawIslandShape(isl, toMapX, toMapZ);
-    mapCtx.fillStyle = `#${isl.color.toString(16).padStart(6, '0')}`;
-    mapCtx.fill();
-    mapCtx.strokeStyle = 'rgba(255,255,255,0.4)';
-    mapCtx.stroke();
-
     mapCtx.fillStyle = '#fff';
     mapCtx.font = '12px sans-serif';
     mapCtx.textAlign = 'center';
@@ -1470,6 +1554,7 @@ function attackNearestNode() {
       return;
     }
 
+    scheduleResourceRespawn(nearestNode);
     scene.remove(nearestNode.mesh);
     disposeObject3D(nearestNode.mesh);
 
@@ -1807,8 +1892,8 @@ let walkTime = 0;
 let swimTime = 0;
 let isSwimming = false;
 let jumpWasDown = false;
-const SWIM_LEVEL_OFFSET = 0.35;
-const SWIM_SPEED = 5.4;
+const SWIM_LEVEL_OFFSET = 2.2;
+const SWIM_SPEED = 8.5;
 
 window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
@@ -1824,6 +1909,7 @@ window.addEventListener('keydown', (e) => {
   if (key === 'f') {
     const aimed = getAimedResourceNode();
     if (aimed && aimed.resourceType === 'pickup' && addItemToInventory(aimed.itemId, aimed.itemName, aimed.yieldCount)) {
+      scheduleResourceRespawn(aimed);
       scene.remove(aimed.mesh);
       const index = resourceNodes.indexOf(aimed);
       if (index !== -1) resourceNodes.splice(index, 1);
@@ -1931,39 +2017,6 @@ window.addEventListener('resize', () => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 });
 
-// 水しぶき：泳いでいることが視覚的に分かるように小さな粒を出す。
-let lastSplashAt = 0;
-const splashGeometry = new THREE.SphereGeometry(0.09, 5, 3);
-const splashMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 });
-function spawnSwimSplash() {
-  const now = performance.now();
-  if (now - lastSplashAt < 300) return;
-  lastSplashAt = now;
-
-  const splash = new THREE.Mesh(splashGeometry, splashMaterial.clone());
-  splash.position.set(
-    playerGroup.position.x + (Math.random() - 0.5) * 0.8,
-    SEA_LEVEL + 0.04,
-    playerGroup.position.z + (Math.random() - 0.5) * 0.8
-  );
-  scene.add(splash);
-
-  const born = now;
-  const life = 0.28;
-  const tick = () => {
-    const progress = (performance.now() - born) / 1000;
-    splash.position.y = SEA_LEVEL + 0.04 + progress * 0.5;
-    splash.scale.setScalar(1 + progress * 1.2);
-    (splash.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.7 - progress * 2.2);
-    if (progress < life) requestAnimationFrame(tick);
-    else {
-      scene.remove(splash);
-      (splash.material as THREE.Material).dispose();
-    }
-  };
-  requestAnimationFrame(tick);
-}
-
 function getSafeThirdPersonCameraPosition(desired: THREE.Vector3): THREE.Vector3 {
   const origin = playerGroup.position.clone();
   origin.y += 1.2;
@@ -2055,8 +2108,6 @@ function animate() {
     if (keys['d'] || keys['arrowright']) { moveX += rightX; moveZ += rightZ; }
 
     const isMoving = moveX !== 0 || moveZ !== 0;
-    if (isSwimming && isMoving) spawnSwimSplash();
-
     if (isMoving) {
       const len = Math.hypot(moveX, moveZ);
       const targetX = playerGroup.position.x + (moveX / len) * speed * delta;
@@ -2318,18 +2369,34 @@ async function loadGroundModel(): Promise<void> {
   });
 }
 
-function addBlenderGround(): void {
-  if (!groundModelTemplate) return;
+function loadIslandGroundModel(path: string, label: string, assign: (model: THREE.Group) => void): Promise<void> {
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      path,
+      (gltf) => {
+        const model = gltf.scene;
+        model.userData.sharedAsset = true;
+        assign(model);
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.warn(`${path} の読み込みに失敗しました。${label}は従来の地形を使用します。`, error);
+        resolve();
+      }
+    );
+  });
+}
 
-  const greenIsland = islands[0];
-  const ground = groundModelTemplate.clone(true);
-  ground.name = 'BlenderGround';
+function addBlenderGround(template: THREE.Group, island: IslandData): void {
+  const ground = template.clone(true);
+  ground.name = `${island.name}BlenderGround`;
 
   const originalBox = new THREE.Box3().setFromObject(ground);
   const originalSize = originalBox.getSize(new THREE.Vector3());
   const horizontalSize = Math.max(originalSize.x, originalSize.z);
   if (horizontalSize > 0.001) {
-    const horizontalScale = (greenIsland.radius * 2) / horizontalSize;
+    const horizontalScale = (island.radius * 2) / horizontalSize;
     ground.scale.x *= horizontalScale;
     ground.scale.y *= 4.0;
     ground.scale.z *= horizontalScale;
@@ -2337,13 +2404,76 @@ function addBlenderGround(): void {
 
   const box = new THREE.Box3().setFromObject(ground);
   const center = box.getCenter(new THREE.Vector3());
-  ground.position.x += greenIsland.x - center.x;
-  ground.position.z += greenIsland.z - center.z;
+  ground.position.x += island.x - center.x;
+  ground.position.z += island.z - center.z;
   ground.position.y += SEA_LEVEL - box.min.y - 132;
+
+  // GLBの四角い外周を、既存のランダムな島形状に合わせて海面下へ隠す。
+  // 元ファイルは変更せず、実行時の表示用クローンだけを加工する。
+  ground.updateWorldMatrix(true, true);
+  const worldVertex = new THREE.Vector3();
+  const localVertex = new THREE.Vector3();
+  const inverseWorld = new THREE.Matrix4();
+  ground.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || !(mesh.geometry instanceof THREE.BufferGeometry)) return;
+
+    mesh.geometry = mesh.geometry.clone();
+    const position = mesh.geometry.attributes.position;
+    inverseWorld.copy(mesh.matrixWorld).invert();
+
+    for (let i = 0; i < position.count; i++) {
+      localVertex.fromBufferAttribute(position, i);
+      worldVertex.copy(localVertex).applyMatrix4(mesh.matrixWorld);
+
+      const dx = worldVertex.x - island.x;
+      const dz = worldVertex.z - island.z;
+      const distance = Math.hypot(dx, dz);
+      const angle = Math.atan2(dz, dx);
+      const coastline = getIslandRadiusAt(island, angle);
+      const shorelineWidth = Math.max(12, getEdgeWidth(island) * 0.7);
+      const outsideAmount = (distance - coastline) / shorelineWidth;
+
+      if (outsideAmount >= 1) {
+        worldVertex.y = SEA_LEVEL - 2;
+      } else if (outsideAmount > 0) {
+        // 海岸付近だけ緩やかに沈めて、段差ではなく自然な輪郭にする。
+        const blend = outsideAmount * outsideAmount * (3 - 2 * outsideAmount);
+        worldVertex.y = THREE.MathUtils.lerp(worldVertex.y, SEA_LEVEL - 2, blend);
+      } else {
+        continue;
+      }
+
+      localVertex.copy(worldVertex).applyMatrix4(inverseWorld);
+      position.setXYZ(i, localVertex.x, localVertex.y, localVertex.z);
+    }
+    position.needsUpdate = true;
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
+  });
 
   ground.traverse((child) => {
     const mesh = child as THREE.Mesh;
     if (mesh.isMesh) {
+      const sourceMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const matteMaterials = sourceMaterials.map((sourceMaterial) => {
+        const material = sourceMaterial.clone();
+        const physicallyBased = material as THREE.MeshStandardMaterial & {
+          envMapIntensity?: number;
+          specularIntensity?: number;
+        };
+        if ('metalness' in physicallyBased) physicallyBased.metalness = 0;
+        if ('roughness' in physicallyBased) physicallyBased.roughness = 1;
+        if ('envMapIntensity' in physicallyBased) physicallyBased.envMapIntensity = 0;
+        if ('specularIntensity' in physicallyBased) physicallyBased.specularIntensity = 0;
+
+        if (material instanceof THREE.MeshPhongMaterial) {
+          material.specular.setRGB(0, 0, 0);
+          material.shininess = 0;
+        }
+        return material;
+      });
+      mesh.material = Array.isArray(mesh.material) ? matteMaterials : matteMaterials[0];
       mesh.castShadow = false;
       mesh.receiveShadow = true;
       mesh.userData.blenderGround = true;
@@ -2351,8 +2481,11 @@ function addBlenderGround(): void {
   });
 
   scene.add(ground);
-  blenderGroundRoot = ground;
-  blenderGroundBounds.setFromObject(ground);
+  blenderGrounds.push({
+    root: ground,
+    bounds: new THREE.Box3().setFromObject(ground),
+    islandName: island.name,
+  });
 }
 
 async function initializeGame() {
@@ -2366,11 +2499,17 @@ async function initializeGame() {
     }
   }, 80);
 
-  // Blender製モデルを先に読み込む。groud1.glbがある場合は、Green Islandの旧地面を使わない。
+  // Blender製モデルを先に読み込む。読み込めた島は旧地形を使わない。
   await Promise.all([
     loadWoodModel(),
     loadRockModel(),
     loadGroundModel(),
+    loadIslandGroundModel(MODEL_PATHS.mountainGround, 'マウンテンアイランド', (model) => {
+      mountainGroundModelTemplate = model;
+    }),
+    loadIslandGroundModel(MODEL_PATHS.sweetGround, 'スゥイートアイランド', (model) => {
+      sweetGroundModelTemplate = model;
+    }),
     loadBerryModel(),
     loadLeafModel(),
   ]);
@@ -2381,13 +2520,12 @@ async function initializeGame() {
   await smoothLoadingProgressTo(55, '地形を準備しています');
   await waitForNextFrame();
 
-  addBlenderGround();
+  if (groundModelTemplate) addBlenderGround(groundModelTemplate, islands[0]);
+  if (mountainGroundModelTemplate) addBlenderGround(mountainGroundModelTemplate, islands[3]);
+  if (sweetGroundModelTemplate) addBlenderGround(sweetGroundModelTemplate, islands[4]);
 
-  proceduralTerrainMesh = buildTerrainMesh(!!blenderGroundRoot);
+  proceduralTerrainMesh = buildTerrainMesh(blenderGrounds.length > 0);
   scene.add(proceduralTerrainMesh);
-  await smoothLoadingProgressTo(68, '草原を作っています');
-  await waitForNextFrame();
-  await addGrass();
   await smoothLoadingProgressTo(86, '資源を配置しています');
 
   playerGroup.position.y = getTerrainHeightAt(playerGroup.position.x, playerGroup.position.z);
