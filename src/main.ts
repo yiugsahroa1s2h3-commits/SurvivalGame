@@ -230,6 +230,78 @@ function buildTerrainMesh(excludeGreenIsland = false): THREE.Mesh {
   return new THREE.Mesh(geo, mat);
 }
 
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+async function smoothLoadingProgressTo(target: number, status: string): Promise<void> {
+  while (loadingProgress < target) {
+    setLoadingProgress(Math.min(target, loadingProgress + 0.8), status);
+    await waitForNextFrame();
+  }
+}
+
+async function addGrass(): Promise<void> {
+  const grassGeometry = new THREE.ConeGeometry(0.16, 0.28, 3);
+  grassGeometry.translate(0, 0.14, 0);
+
+  const coastalMargin = 24;
+  const gridSpacing = 3.5;
+  const dummy = new THREE.Object3D();
+
+  for (const [islandIndex, isl] of islands.entries()) {
+    const grassColor = new THREE.Color(isl.color).multiplyScalar(0.72);
+    const positions: Array<{ x: number; z: number; groundY: number }> = [];
+    const scanRadius = isl.radius + 4;
+    const totalRows = Math.ceil((scanRadius * 2) / gridSpacing) + 1;
+    let rowIndex = 0;
+
+    for (let x = isl.x - scanRadius; x <= isl.x + scanRadius; x += gridSpacing) {
+      for (let z = isl.z - scanRadius; z <= isl.z + scanRadius; z += gridSpacing) {
+        const dx = x - isl.x;
+        const dz = z - isl.z;
+        const angle = Math.atan2(dz, dx);
+        const inlandRadius = getIslandRadiusAt(isl, angle) - coastalMargin;
+        if (Math.hypot(dx, dz) > inlandRadius) continue;
+
+        const groundY = islandIndex === 0 && blenderGroundRoot
+          ? getTerrainHeightAt(x, z)
+          : isl.height;
+        if (groundY >= isl.height - 0.5) positions.push({ x, z, groundY });
+      }
+
+      rowIndex++;
+      if (rowIndex % 6 === 0) {
+        const grassProgress = 68 + ((islandIndex + rowIndex / totalRows) / islands.length) * 15;
+        setLoadingProgress(grassProgress, '草原を作っています');
+        await waitForNextFrame();
+      }
+    }
+
+    const grassMaterial = new THREE.MeshLambertMaterial({ color: grassColor });
+    const grass = new THREE.InstancedMesh(grassGeometry, grassMaterial, positions.length);
+    grass.name = `${isl.name}の草`;
+    grass.castShadow = false;
+    grass.receiveShadow = true;
+
+    for (let index = 0; index < positions.length; index++) {
+      const point = positions[index];
+      dummy.position.set(point.x, point.groundY, point.z);
+      dummy.rotation.y = Math.random() * Math.PI * 2;
+      const scale = 0.8 + Math.random() * 0.35;
+      dummy.scale.set(scale, 0.7 + Math.random() * 0.4, scale);
+      dummy.updateMatrix();
+      grass.setMatrixAt(index, dummy.matrix);
+      if ((index + 1) % 3000 === 0) await waitForNextFrame();
+    }
+
+    grass.instanceMatrix.needsUpdate = true;
+    scene.add(grass);
+    setLoadingProgress(68 + (islandIndex + 1) * 3, '草原を作っています');
+    await waitForNextFrame();
+  }
+}
+
 
 // --- 4. プレイヤー（頭・胴体・両手・両足） ---
 const playerGroup = new THREE.Group();
@@ -572,7 +644,7 @@ function createTreeResource(
     yieldCount: size === 'large' ? 10 : size === 'normal' ? 5 : 3,
     health,
     maxHealth: health,
-    radius: 0.8 * sizeScale,
+    radius: 0.6 * sizeScale,
     resourceType: 'tree',
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
@@ -618,7 +690,7 @@ function createRockResource(
     yieldCount: size === 'large' ? 6 : size === 'normal' ? 3 : 2,
     health,
     maxHealth: health,
-    radius: 1.2 * sizeScale,
+    radius: 0.85 * sizeScale,
     resourceType: 'rock',
     resourceSize: size,
     islandName: getCurrentIslandName(x, z),
@@ -748,18 +820,21 @@ function randomPointOnIsland(isl: IslandData, margin: number): { x: number; z: n
   return null;
 }
 
-function spawnIslandResources(
+async function spawnIslandResources(
   isl: IslandData,
   treeCount: number,
   rockCount: number,
   pickupCounts: Record<string, number>
 ) {
+  let createdCount = 0;
   for (let i = 0; i < treeCount; i++) {
     const point = randomPointOnIsland(isl, 15);
     if (!point) continue;
     const node = createTreeResource(point.x, point.groundY, point.z, getTreeSize());
     node.islandName = isl.name;
     resourceNodes.push(node);
+    createdCount++;
+    if (createdCount % 20 === 0) await waitForNextFrame();
   }
 
   for (let i = 0; i < rockCount; i++) {
@@ -768,6 +843,8 @@ function spawnIslandResources(
     const node = createRockResource(point.x, point.groundY, point.z, getRockSize());
     node.islandName = isl.name;
     resourceNodes.push(node);
+    createdCount++;
+    if (createdCount % 20 === 0) await waitForNextFrame();
   }
 
   for (const [itemId, count] of Object.entries(pickupCounts)) {
@@ -787,6 +864,8 @@ function spawnIslandResources(
       if (!point) continue;
       const amount = itemId === 'leaf' ? 3 + Math.floor(Math.random() * 5) : 1 + Math.floor(Math.random() * 3);
       resourceNodes.push(createPickupResource(point.x, point.groundY, point.z, itemId, names[itemId] ?? itemId, amount, isl.name));
+      createdCount++;
+      if (createdCount % 20 === 0) await waitForNextFrame();
     }
   }
 }
@@ -797,17 +876,25 @@ function spawnIslandResources(
 // マウンテンアイランド：石・鉱物を圧倒的に多くする。
 // オールドシティ：基本資源に加えて鉄の破片・粘土を多めにする。
 // スゥイート：木・石は少なめ、食料系を多めにする。
-function spawnAllIslandResources() {
+async function spawnAllIslandResources() {
   // グリーンアイランド：草地を中心に、木・石・葉・粘土・食料を幅広く大量配置。
-  spawnIslandResources(islands[0], 45, 30, { leaf: 140, clay: 35, berry: 30, mushroom: 15, high_grade_wood: 4, potato: 35, tomato: 35, corn: 35, wheat: 35, raw_chicken: 12, raw_beef: 12, raw_egg: 20, bottle_water: 20, cooking_oil: 12 });
+  await spawnIslandResources(islands[0], 45, 30, { leaf: 140, clay: 35, berry: 30, mushroom: 15, high_grade_wood: 4, potato: 35, tomato: 35, corn: 35, wheat: 35, raw_chicken: 12, raw_beef: 12, raw_egg: 20, bottle_water: 20, cooking_oil: 12 });
+  await smoothLoadingProgressTo(88.8, '資源を配置しています');
+  await waitForNextFrame();
   // フォレストアイランド：木を圧倒的に多く、葉も大量。
-  spawnIslandResources(islands[1], 240, 35, { leaf: 700, berry: 80, mushroom: 80, clay: 50, high_grade_wood: 40, mint: 45, cocoa: 35, vanilla_pod: 20, cinnamon: 20, raw_fish: 20, shrimp: 20 });
+  await spawnIslandResources(islands[1], 240, 35, { leaf: 700, berry: 80, mushroom: 80, clay: 50, high_grade_wood: 40, mint: 45, cocoa: 35, vanilla_pod: 20, cinnamon: 20, raw_fish: 20, shrimp: 20 });
+  await smoothLoadingProgressTo(91.6, '資源を配置しています');
+  await waitForNextFrame();
   // オールドシティアイランド：木・石は少なめ、鉄の破片と粘土を大量配置。
-  spawnIslandResources(islands[2], 18, 18, { leaf: 60, clay: 160, iron_fragment: 220, hide: 20, sand: 150, plastic: 25, petroleum: 15, bone: 25, gold_ore: 10, silver_ore: 15 });
+  await spawnIslandResources(islands[2], 18, 18, { leaf: 60, clay: 160, iron_fragment: 220, hide: 20, sand: 150, plastic: 25, petroleum: 15, bone: 25, gold_ore: 10, silver_ore: 15 });
+  await smoothLoadingProgressTo(94.4, '資源を配置しています');
+  await waitForNextFrame();
   // マウンテンアイランド：石を圧倒的に多く、鉄の破片も少し配置。
-  spawnIslandResources(islands[3], 22, 220, { leaf: 40, iron_fragment: 120, clay: 55, coal: 100, sulfur_ore: 40, copper_ore: 40, silver_ore: 25, gold_ore: 25, platinum_ore: 10, silicon: 20, rock_salt: 35 });
+  await spawnIslandResources(islands[3], 22, 220, { leaf: 40, iron_fragment: 120, clay: 55, coal: 100, sulfur_ore: 40, copper_ore: 40, silver_ore: 25, gold_ore: 25, platinum_ore: 10, silicon: 20, rock_salt: 35 });
+  await smoothLoadingProgressTo(97.2, '資源を配置しています');
+  await waitForNextFrame();
   // スゥイートアイランド：木・石は少なめ、食料系を大量配置。
-  spawnIslandResources(islands[4], 18, 22, { leaf: 70, berry: 280, mushroom: 150, clay: 25, watermelon: 60, sugar: 100, maple_syrup: 30, vanilla: 25, milk: 35, cheese: 15, wheat: 70 });
+  await spawnIslandResources(islands[4], 18, 22, { leaf: 70, berry: 280, mushroom: 150, clay: 25, watermelon: 60, sugar: 100, maple_syrup: 30, vanilla: 25, milk: 35, cheese: 15, wheat: 70 });
 }
 
 
@@ -1402,16 +1489,13 @@ function attackNearestNode() {
 }
 
 function getResourceCollisionData(node: ResourceNode): { x: number; z: number; radius: number } {
+  if (node.resourceType !== 'pickup') {
+    return { x: node.mesh.position.x, z: node.mesh.position.z, radius: node.radius };
+  }
+
   const box = new THREE.Box3().setFromObject(node.mesh);
   const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const radius = Math.max(
-    node.radius,
-    size.x * 0.5,
-    size.z * 0.5,
-    node.resourceType === 'tree' ? 0.9 : node.resourceType === 'rock' ? 1.1 : 0.6
-  );
-  return { x: center.x, z: center.z, radius };
+  return { x: center.x, z: center.z, radius: node.radius };
 }
 
 function resolveObjectCollisions(newX: number, newZ: number): { x: number; z: number } {
@@ -2241,8 +2325,6 @@ function addBlenderGround(): void {
   const ground = groundModelTemplate.clone(true);
   ground.name = 'BlenderGround';
 
-  // groud1.glbの実測サイズは約40×40なので、Green Islandの直径544に合わせる。
-  // X/Zだけを拡大し、Y方向の起伏はそのまま残す。
   const originalBox = new THREE.Box3().setFromObject(ground);
   const originalSize = originalBox.getSize(new THREE.Vector3());
   const horizontalSize = Math.max(originalSize.x, originalSize.z);
@@ -2253,12 +2335,11 @@ function addBlenderGround(): void {
     ground.scale.z *= horizontalScale;
   }
 
-  // X/Zの中心をGreen Islandの中心(0,0)へ合わせ、最低点を海面へ置く。
   const box = new THREE.Box3().setFromObject(ground);
   const center = box.getCenter(new THREE.Vector3());
   ground.position.x += greenIsland.x - center.x;
   ground.position.z += greenIsland.z - center.z;
-  ground.position.y += SEA_LEVEL - box.min.y-132;
+  ground.position.y += SEA_LEVEL - box.min.y - 132;
 
   ground.traverse((child) => {
     const mesh = child as THREE.Mesh;
@@ -2278,6 +2359,13 @@ async function initializeGame() {
   if (gameInitialized) return;
   gameInitialized = true;
 
+  setLoadingProgress(8, 'ゲームデータを読み込んでいます');
+  loadingProgressTimer = window.setInterval(() => {
+    if (loadingProgress < 52) {
+      setLoadingProgress(loadingProgress + 0.35, 'ゲームデータを読み込んでいます');
+    }
+  }, 80);
+
   // Blender製モデルを先に読み込む。groud1.glbがある場合は、Green Islandの旧地面を使わない。
   await Promise.all([
     loadWoodModel(),
@@ -2286,27 +2374,55 @@ async function initializeGame() {
     loadBerryModel(),
     loadLeafModel(),
   ]);
+  if (loadingProgressTimer !== null) {
+    window.clearInterval(loadingProgressTimer);
+    loadingProgressTimer = null;
+  }
+  await smoothLoadingProgressTo(55, '地形を準備しています');
+  await waitForNextFrame();
 
   addBlenderGround();
 
   proceduralTerrainMesh = buildTerrainMesh(!!blenderGroundRoot);
   scene.add(proceduralTerrainMesh);
+  await smoothLoadingProgressTo(68, '草原を作っています');
+  await waitForNextFrame();
+  await addGrass();
+  await smoothLoadingProgressTo(86, '資源を配置しています');
 
   playerGroup.position.y = getTerrainHeightAt(playerGroup.position.x, playerGroup.position.z);
 
-  spawnAllIslandResources();
+  await spawnAllIslandResources();
   rebuildResourceHitObjects();
   updateUI();
   renderUI();
+  setLoadingProgress(100, '準備完了');
+  loadingScreen.classList.remove('active');
   animate();
 }
 
 const startScreen = document.getElementById('start-screen')!;
 const startButton = document.getElementById('start-button')!;
+const loadingScreen = document.getElementById('loading-screen')!;
+const loadingStatus = document.getElementById('loading-status')!;
+const loadingProgressBar = document.getElementById('loading-progress-bar')!;
+const loadingProgressValue = document.getElementById('loading-progress-value')!;
 let gameInitialized = false;
+let loadingProgress = 0;
+let loadingProgressTimer: number | null = null;
+
+function setLoadingProgress(progress: number, status: string): void {
+  const clampedProgress = Math.max(0, Math.min(100, progress));
+  loadingProgress = clampedProgress;
+  loadingProgressBar.style.width = `${clampedProgress}%`;
+  loadingProgressValue.textContent = `${Math.round(clampedProgress)}%`;
+  loadingStatus.textContent = status;
+}
 
 startButton.addEventListener('click', () => {
   startScreen.classList.add('hidden');
+  loadingScreen.classList.add('active');
+  setLoadingProgress(0, 'ゲームデータを準備しています');
   initializeGame();
   document.body.requestPointerLock();
 });
