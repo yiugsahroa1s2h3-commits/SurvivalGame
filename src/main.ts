@@ -1,4 +1,5 @@
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import * as THREE from 'three';
 
 // 1. シーン・カメラ・レンダラー
@@ -115,17 +116,23 @@ function getEdgeWidth(isl: IslandData): number {
 function getTerrainHeightAt(x: number, z: number): number {
   // Blender地面がある場合は、GLBそのものをレイキャストして高さを取る。
   // これにより「見た目はGLB、当たり判定は古い地形」というズレを防ぐ。
+  let insideBlenderGroundBounds = false;
   for (const blenderGround of blenderGrounds) {
     const min = blenderGround.bounds.min;
     const max = blenderGround.bounds.max;
     const margin = 1;
     if (x >= min.x - margin && x <= max.x + margin && z >= min.z - margin && z <= max.z + margin) {
+      insideBlenderGroundBounds = true;
       blenderGroundRayOrigin.set(x, max.y + 50, z);
       blenderGroundRaycaster.set(blenderGroundRayOrigin, blenderGroundRayDirection);
       const hits = blenderGroundRaycaster.intersectObject(blenderGround.root, true);
       if (hits.length > 0) return hits[0].point.y;
     }
   }
+
+  // GLB地形の範囲内で地面が見つからない場所は、旧地形の高さへ戻さない。
+  // 旧地形を使うと、見た目には地面がない場所へ資源やプレイヤーが浮いた状態で配置される。
+  if (insideBlenderGroundBounds) return SEA_LEVEL;
 
   // Blender地面がない島は従来のプロシージャル地形を使う。
   let maxHeight = 0;
@@ -252,6 +259,7 @@ async function smoothLoadingProgressTo(target: number, status: string): Promise<
 
 // --- 4. プレイヤー（頭・胴体・両手・両足） ---
 const playerGroup = new THREE.Group();
+let humanModel: THREE.Group | null = null;
 
 const skinMat = new THREE.MeshLambertMaterial({ color: 0xffdbac });
 const shirtMat = new THREE.MeshLambertMaterial({ color: 0xe74c3c });
@@ -495,22 +503,272 @@ const RESOURCE_RESPAWN_MS = 5 * 60 * 1000;
 // Blenderで作成した木モデル（public/wood1.glb）を共有して使う。
 // すべての木で同じジオメトリを共有することで、木が大量にあっても無駄な読み込みを避ける。
 const gltfLoader = new GLTFLoader();
+const fbxLoader = new FBXLoader();
 const MODEL_PATHS = {
+  human: '/human_3.glb',
+  running: '/animation/Running.fbx',
   wood: '/wood1.glb',
   stone: '/stone2.glb',
   berry: '/berry1.glb',
   leaf: '/leaf1.glb',
   ground: '/groud1.glb',
+  forestGround: '/Forest_groud1.glb',
+  oldCityGround: '/Oldcity_groud1.glb',
   mountainGround: '/MountainIsland_groud1.glb',
   sweetGround: '/SweetIsland_groud1.glb',
 } as const;
 let woodModelTemplate: THREE.Group | null = null;
 let rockModelTemplate: THREE.Group | null = null;
 let groundModelTemplate: THREE.Group | null = null;
+let forestGroundModelTemplate: THREE.Group | null = null;
+let oldCityGroundModelTemplate: THREE.Group | null = null;
 let berryModelTemplate: THREE.Group | null = null;
 let leafModelTemplate: THREE.Group | null = null;
 let mountainGroundModelTemplate: THREE.Group | null = null;
 let sweetGroundModelTemplate: THREE.Group | null = null;
+let humanAnimationMixer: THREE.AnimationMixer | null = null;
+let humanRunningAction: THREE.AnimationAction | null = null;
+let isHumanRunning = false;
+let humanRunningCycleDuration = 0.8;
+let humanRunningTime = 0;
+let humanModelBaseY = 0;
+let humanModelBaseRotationX = 0;
+let humanModelBaseRotationZ = 0;
+let humanBodyMesh: THREE.Mesh | null = null;
+let humanBodyBasePositions: Float32Array | null = null;
+let humanBodyBaseBounds = { minY: 0, maxY: 1 };
+
+function loadHumanModel(): Promise<void> {
+  return new Promise((resolve) => {
+    gltfLoader.load(
+      MODEL_PATHS.human,
+      (gltf) => {
+        humanModel = gltf.scene;
+        humanModel.userData.sharedAsset = true;
+
+        const bounds = new THREE.Box3().setFromObject(humanModel);
+        const height = bounds.max.y - bounds.min.y;
+        if (height > 0.001) humanModel.scale.setScalar(2 / height);
+
+        humanModel.updateWorldMatrix(true, true);
+        const scaledBounds = new THREE.Box3().setFromObject(humanModel);
+        humanModel.position.y -= scaledBounds.min.y;
+        humanModelBaseY = humanModel.position.y;
+        humanModelBaseRotationX = humanModel.rotation.x;
+        humanModelBaseRotationZ = humanModel.rotation.z;
+        humanModel.traverse((child) => {
+          child.visible = true;
+          const mesh = child as THREE.Mesh;
+          if (!mesh.isMesh) return;
+
+          if (mesh.name === 'Human' && mesh.geometry instanceof THREE.BufferGeometry) {
+            humanBodyMesh = mesh;
+            humanBodyBasePositions = new Float32Array(mesh.geometry.attributes.position.array);
+            mesh.geometry.computeBoundingBox();
+            const bodyBounds = mesh.geometry.boundingBox;
+            if (bodyBounds) humanBodyBaseBounds = { minY: bodyBounds.min.y, maxY: bodyBounds.max.y };
+          }
+
+          // GLB内の女性向けシェイプキーだけを無効化する。
+          // 男性向け・共通のシェイプキーは元の値を維持する。
+          if (mesh.morphTargetDictionary && mesh.morphTargetInfluences) {
+            for (const [targetName, targetIndex] of Object.entries(mesh.morphTargetDictionary)) {
+              const normalizedName = targetName.toLowerCase();
+              if (normalizedName.includes('$fe-') || normalizedName.includes('female')) {
+                mesh.morphTargetInfluences[targetIndex] = 0;
+              }
+            }
+          }
+
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          // GLBのマテリアル設定を尊重し、必要以上に裏面まで描画しない。
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          materials.forEach((material) => { material.side = THREE.FrontSide; });
+        });
+        playerGroup.add(humanModel);
+
+        head.visible = false;
+        torso.visible = false;
+        leftLegGroup.visible = false;
+        rightLegGroup.visible = false;
+        leftArmGroup.visible = false;
+        rightArmGroup.visible = false;
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.warn(`${MODEL_PATHS.human} の読み込みに失敗しました。従来の人モデルを使用します。`, error);
+        resolve();
+      }
+    );
+  });
+}
+
+function loadHumanRunningAnimation(): Promise<void> {
+  return new Promise((resolve) => {
+    if (!humanModel) {
+      resolve();
+      return;
+    }
+    const model = humanModel;
+
+    fbxLoader.load(
+      MODEL_PATHS.running,
+      (fbx) => {
+        const runningClip = fbx.animations[0];
+        // 走りアニメーションの動きを大きくする
+const animationScale = 5;
+
+runningClip.tracks.forEach((track) => {
+  const values = track.values;
+
+  // 回転アニメーションを拡大
+  if (track.name.endsWith('.quaternion')) {
+    for (let i = 0; i < values.length; i += 4) {
+      const q = new THREE.Quaternion(
+        values[i],
+        values[i + 1],
+        values[i + 2],
+        values[i + 3]
+      );
+
+      const axis = new THREE.Vector3();
+      const angle = 2 * Math.acos(THREE.MathUtils.clamp(q.w, -1, 1));
+
+      if (angle > 0.0001) {
+        axis.set(q.x, q.y, q.z).normalize();
+        const scaledQ = new THREE.Quaternion().setFromAxisAngle(
+          axis,
+          angle * animationScale
+        );
+
+        values[i] = scaledQ.x;
+        values[i + 1] = scaledQ.y;
+        values[i + 2] = scaledQ.z;
+        values[i + 3] = scaledQ.w;
+      }
+    }
+  }
+});
+
+        let hasRenderableMesh = false;
+        fbx.traverse((child) => {
+          if (child instanceof THREE.Mesh) hasRenderableMesh = true;
+        });
+
+        if (!hasRenderableMesh) {
+          humanRunningCycleDuration = Math.max(0.1, runningClip.duration);
+          console.warn(`${MODEL_PATHS.running} はアニメーション専用のため、既存の人間モデルを表示します。`);
+          resolve();
+          return;
+        }
+
+        playerGroup.remove(model);
+        humanModel = fbx;
+        humanModel.userData.sharedAsset = true;
+        humanAnimationMixer = new THREE.AnimationMixer(humanModel);
+        humanRunningAction = humanAnimationMixer.clipAction(runningClip);
+        humanRunningAction.setLoop(THREE.LoopRepeat, Infinity);
+        humanRunningAction.stop();
+        playerGroup.add(humanModel);
+        resolve();
+      },
+      undefined,
+      (error) => {
+        console.warn(`${MODEL_PATHS.running} の読み込みに失敗しました。従来の歩行アニメーションを使用します。`, error);
+        resolve();
+      }
+    );
+  });
+}
+
+function setHumanRunning(running: boolean): void {
+  if (running === isHumanRunning) return;
+
+  isHumanRunning = running;
+  if (!humanRunningAction) return;
+  if (running) {
+    humanRunningAction.reset().play();
+  } else {
+    humanRunningAction.stop();
+  }
+}
+
+function updateHumanFallbackAnimation(delta: number): void {
+  if (!humanModel) return;
+
+  if (isHumanRunning) {
+    humanRunningTime = (humanRunningTime + delta) % humanRunningCycleDuration;
+    const phase = (humanRunningTime / humanRunningCycleDuration) * Math.PI * 2;
+    humanModel.position.y = humanModelBaseY + Math.abs(Math.sin(phase)) * 0.04;
+    humanModel.rotation.x = humanModelBaseRotationX + Math.cos(phase) * 0.025;
+    humanModel.rotation.z = humanModelBaseRotationZ + Math.sin(phase) * 0.035;
+    animateHumanLegVertices(phase);
+    return;
+  }
+
+  humanRunningTime = 0;
+  humanModel.position.y = humanModelBaseY;
+  humanModel.rotation.x = humanModelBaseRotationX;
+  humanModel.rotation.z = humanModelBaseRotationZ;
+  animateHumanLegVertices(0);
+}
+
+function animateHumanLegVertices(phase: number): void {
+  if (!humanBodyMesh || !humanBodyBasePositions) return;
+
+  const positions = humanBodyMesh.geometry.attributes.position;
+  const basePositions = humanBodyBasePositions;
+  const height = humanBodyBaseBounds.maxY - humanBodyBaseBounds.minY;
+  const hipY = humanBodyBaseBounds.minY + height * 0.54;
+  const legTopY = humanBodyBaseBounds.minY + height * 0.62;
+  const shoulderY = humanBodyBaseBounds.minY + height * 0.79;
+  const armBottomY = humanBodyBaseBounds.minY + height * 0.42;
+  const swing = Math.sin(phase) * 0.28;
+
+  for (let i = 0; i < positions.count; i++) {
+    const offset = i * 3;
+    const baseX = basePositions[offset];
+    const baseY = basePositions[offset + 1];
+    const baseZ = basePositions[offset + 2];
+    const lateralDistance = Math.abs(baseX);
+    const legWeight = lateralDistance < 0.22
+      ? THREE.MathUtils.clamp((legTopY - baseY) / Math.max(0.001, legTopY - humanBodyBaseBounds.minY), 0, 1)
+      : 0;
+    const armHeightWeight = THREE.MathUtils.clamp(
+      (shoulderY - baseY) / Math.max(0.001, shoulderY - armBottomY),
+      0,
+      1
+    );
+    const armSideWeight = THREE.MathUtils.clamp((lateralDistance - 0.22) / 0.12, 0, 1);
+    const armWeight = armHeightWeight * armSideWeight;
+    const side = baseX < 0 ? -1 : 1;
+    const legSwing = swing * side * legWeight;
+    const armSwing = -swing * side * armWeight;
+
+    if (legWeight <= 0 && armWeight <= 0) {
+      positions.setXYZ(i, baseX, baseY, baseZ);
+      continue;
+    }
+
+    const rotation = legWeight > 0 ? legSwing : armSwing;
+    const pivotY = legWeight > 0 ? hipY : shoulderY;
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+    const relativeY = baseY - pivotY;
+    const relativeZ = baseZ;
+    positions.setXYZ(
+      i,
+      baseX,
+      pivotY + relativeY * cos - relativeZ * sin,
+      relativeY * sin + relativeZ * cos
+    );
+  }
+
+  positions.needsUpdate = true;
+  humanBodyMesh.geometry.computeVertexNormals();
+}
 
 const treeDurability: Record<ResourceNode['resourceSize'], number> = {
   small: 50,
@@ -1880,7 +2138,7 @@ function toggleBuildMode() {
 const keys: { [key: string]: boolean } = {};
 let cameraYaw = 0;
 let cameraPitch = 0.2;
-const thirdPersonDistance = 8;
+const thirdPersonDistance = 3;
 
 let isFirstPerson = false;
 
@@ -2108,6 +2366,7 @@ function animate() {
     if (keys['d'] || keys['arrowright']) { moveX += rightX; moveZ += rightZ; }
 
     const isMoving = moveX !== 0 || moveZ !== 0;
+    setHumanRunning(isMoving && !inWater);
     if (isMoving) {
       const len = Math.hypot(moveX, moveZ);
       const targetX = playerGroup.position.x + (moveX / len) * speed * delta;
@@ -2188,6 +2447,11 @@ function animate() {
 
     checkInteractions();
     updateBuildPreview();
+  }
+
+  if (!paused) {
+    humanAnimationMixer?.update(delta);
+    updateHumanFallbackAnimation(delta);
   }
 
   // ダメージ数字を更新
@@ -2501,9 +2765,16 @@ async function initializeGame() {
 
   // Blender製モデルを先に読み込む。読み込めた島は旧地形を使わない。
   await Promise.all([
+    loadHumanModel(),
     loadWoodModel(),
     loadRockModel(),
     loadGroundModel(),
+    loadIslandGroundModel(MODEL_PATHS.forestGround, 'フォレストアイランド', (model) => {
+      forestGroundModelTemplate = model;
+    }),
+    loadIslandGroundModel(MODEL_PATHS.oldCityGround, 'オールドシティアイランド', (model) => {
+      oldCityGroundModelTemplate = model;
+    }),
     loadIslandGroundModel(MODEL_PATHS.mountainGround, 'マウンテンアイランド', (model) => {
       mountainGroundModelTemplate = model;
     }),
@@ -2513,6 +2784,7 @@ async function initializeGame() {
     loadBerryModel(),
     loadLeafModel(),
   ]);
+  await loadHumanRunningAnimation();
   if (loadingProgressTimer !== null) {
     window.clearInterval(loadingProgressTimer);
     loadingProgressTimer = null;
@@ -2521,6 +2793,8 @@ async function initializeGame() {
   await waitForNextFrame();
 
   if (groundModelTemplate) addBlenderGround(groundModelTemplate, islands[0]);
+  if (forestGroundModelTemplate) addBlenderGround(forestGroundModelTemplate, islands[1]);
+  if (oldCityGroundModelTemplate) addBlenderGround(oldCityGroundModelTemplate, islands[2]);
   if (mountainGroundModelTemplate) addBlenderGround(mountainGroundModelTemplate, islands[3]);
   if (sweetGroundModelTemplate) addBlenderGround(sweetGroundModelTemplate, islands[4]);
 
