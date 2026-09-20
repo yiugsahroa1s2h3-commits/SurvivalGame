@@ -1,12 +1,9 @@
 {
-  "name": "SurvivalGame",
   "forwardPorts": [5173],
   "portsAttributes": {
     "5173": {
       "label": "SurvivalGame",
-      "onAutoForward": "openBrowser",
-      "visibility": "public"
+      "onAutoForward": "openBrowser"
     }
-  },
-  "postStartCommand": "nohup npm run dev > /tmp/survivalgame-vite.log 2>&1 &"
+  }
 }

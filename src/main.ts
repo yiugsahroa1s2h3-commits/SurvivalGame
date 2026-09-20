@@ -414,6 +414,8 @@ function showDamageNumber(target: THREE.Object3D, damage: number) {
 }
 
 function playAttackEffect(target: THREE.Object3D) {
+  isHumanHitAnimating = true;
+  humanHitTime = 0;
   attackFlash.style.opacity = '1';
   attackFlash.style.transform = 'translate(-50%, -50%) scale(0.65)';
   window.setTimeout(() => {
@@ -506,7 +508,8 @@ const gltfLoader = new GLTFLoader();
 const fbxLoader = new FBXLoader();
 const MODEL_PATHS = {
   human: '/human_3.glb',
-  running: '/animation/Running.fbx',
+  walking: '/animation/Walking.fbx',
+  stomachHit: '/animation/Stomach Hit.fbx',
   wood: '/wood1.glb',
   stone: '/stone2.glb',
   berry: '/berry1.glb',
@@ -529,8 +532,11 @@ let sweetGroundModelTemplate: THREE.Group | null = null;
 let humanAnimationMixer: THREE.AnimationMixer | null = null;
 let humanRunningAction: THREE.AnimationAction | null = null;
 let isHumanRunning = false;
-let humanRunningCycleDuration = 0.8;
+let humanWalkingCycleDuration = 0.9667;
+let humanHitCycleDuration = 1.2;
 let humanRunningTime = 0;
+let humanHitTime = 0;
+let isHumanHitAnimating = false;
 let humanModelBaseY = 0;
 let humanModelBaseRotationX = 0;
 let humanModelBaseRotationZ = 0;
@@ -605,53 +611,31 @@ function loadHumanModel(): Promise<void> {
   });
 }
 
-function loadHumanRunningAnimation(): Promise<void> {
+function loadAnimationClip(path: string): Promise<THREE.AnimationClip | null> {
   return new Promise((resolve) => {
-    if (!humanModel) {
-      resolve();
-      return;
-    }
-    const model = humanModel;
-
     fbxLoader.load(
-      MODEL_PATHS.running,
-      (fbx) => {
-        const runningClip = fbx.animations[0];
-        if (!runningClip) {
-          console.warn(`${MODEL_PATHS.running} にアニメーションクリップがありません。`);
-          resolve();
-          return;
-        }
-
-        let hasRenderableMesh = false;
-        fbx.traverse((child) => {
-          if (child instanceof THREE.Mesh) hasRenderableMesh = true;
-        });
-
-        if (!hasRenderableMesh) {
-          humanRunningCycleDuration = Math.max(0.1, runningClip.duration);
-          console.warn(`${MODEL_PATHS.running} はアニメーション専用のため、既存の人間モデルを表示します。`);
-          resolve();
-          return;
-        }
-
-        playerGroup.remove(model);
-        humanModel = fbx;
-        humanModel.userData.sharedAsset = true;
-        humanAnimationMixer = new THREE.AnimationMixer(humanModel);
-        humanRunningAction = humanAnimationMixer.clipAction(runningClip);
-        humanRunningAction.setLoop(THREE.LoopRepeat, Infinity);
-        humanRunningAction.stop();
-        playerGroup.add(humanModel);
-        resolve();
-      },
+      path,
+      (fbx) => resolve(fbx.animations[0] ?? null),
       undefined,
       (error) => {
-        console.warn(`${MODEL_PATHS.running} の読み込みに失敗しました。従来の歩行アニメーションを使用します。`, error);
-        resolve();
+        console.warn(`${path} の読み込みに失敗しました。`, error);
+        resolve(null);
       }
     );
   });
+}
+
+async function loadHumanAnimations(): Promise<void> {
+  const [walkingClip, hitClip] = await Promise.all([
+    loadAnimationClip(MODEL_PATHS.walking),
+    loadAnimationClip(MODEL_PATHS.stomachHit),
+  ]);
+
+  if (walkingClip) humanWalkingCycleDuration = Math.max(0.1, walkingClip.duration);
+  if (hitClip) humanHitCycleDuration = Math.max(0.1, hitClip.duration);
+
+  if (!walkingClip) console.warn(`${MODEL_PATHS.walking} にアニメーションクリップがありません。`);
+  if (!hitClip) console.warn(`${MODEL_PATHS.stomachHit} にアニメーションクリップがありません。`);
 }
 
 function setHumanRunning(running: boolean): void {
@@ -670,23 +654,40 @@ function updateHumanFallbackAnimation(delta: number): void {
   if (!humanModel) return;
 
   if (isHumanRunning) {
-    humanRunningTime = (humanRunningTime + delta) % humanRunningCycleDuration;
-    const phase = (humanRunningTime / humanRunningCycleDuration) * Math.PI * 2;
-    humanModel.position.y = humanModelBaseY + Math.abs(Math.sin(phase)) * 0.04;
-    humanModel.rotation.x = humanModelBaseRotationX + Math.cos(phase) * 0.025;
-    humanModel.rotation.z = humanModelBaseRotationZ + Math.sin(phase) * 0.035;
-    animateHumanLegVertices(phase);
-    return;
+    humanRunningTime = (humanRunningTime + delta) % humanWalkingCycleDuration;
+  } else {
+    humanRunningTime = 0;
   }
 
-  humanRunningTime = 0;
-  humanModel.position.y = humanModelBaseY;
-  humanModel.rotation.x = humanModelBaseRotationX;
-  humanModel.rotation.z = humanModelBaseRotationZ;
-  animateHumanLegVertices(0);
+  if (isHumanHitAnimating) {
+    humanHitTime += delta;
+    if (humanHitTime >= humanHitCycleDuration) {
+      humanHitTime = 0;
+      isHumanHitAnimating = false;
+    }
+  }
+
+  const walkingPhase = isHumanRunning
+    ? (humanRunningTime / humanWalkingCycleDuration) * Math.PI * 2
+    : 0;
+  const hitPhase = isHumanHitAnimating
+    ? (humanHitTime / humanHitCycleDuration) * Math.PI * 2
+    : 0;
+
+  if (isHumanRunning) {
+    humanModel.position.y = humanModelBaseY + Math.abs(Math.sin(walkingPhase)) * 0.04;
+    humanModel.rotation.x = humanModelBaseRotationX + Math.cos(walkingPhase) * 0.025;
+    humanModel.rotation.z = humanModelBaseRotationZ + Math.sin(walkingPhase) * 0.035;
+  } else {
+    humanModel.position.y = humanModelBaseY;
+    humanModel.rotation.x = humanModelBaseRotationX;
+    humanModel.rotation.z = humanModelBaseRotationZ;
+  }
+
+  animateHumanLegVertices(walkingPhase, hitPhase);
 }
 
-function animateHumanLegVertices(phase: number): void {
+function animateHumanLegVertices(walkingPhase: number, hitPhase: number): void {
   if (!humanBodyMesh || !humanBodyBasePositions) return;
 
   const positions = humanBodyMesh.geometry.attributes.position;
@@ -696,7 +697,8 @@ function animateHumanLegVertices(phase: number): void {
   const legTopY = humanBodyBaseBounds.minY + height * 0.62;
   const shoulderY = humanBodyBaseBounds.minY + height * 0.79;
   const armBottomY = humanBodyBaseBounds.minY + height * 0.42;
-  const swing = Math.sin(phase) * 0.28;
+  const swing = Math.sin(walkingPhase) * 0.28;
+  const hitSwing = Math.sin(hitPhase) * 0.9;
 
   for (let i = 0; i < positions.count; i++) {
     const offset = i * 3;
@@ -716,7 +718,7 @@ function animateHumanLegVertices(phase: number): void {
     const armWeight = armHeightWeight * armSideWeight;
     const side = baseX < 0 ? -1 : 1;
     const legSwing = swing * side * legWeight;
-    const armSwing = -swing * side * armWeight;
+    const armSwing = (-swing * side + hitSwing) * armWeight;
 
     if (legWeight <= 0 && armWeight <= 0) {
       positions.setXYZ(i, baseX, baseY, baseZ);
@@ -2755,7 +2757,7 @@ async function initializeGame() {
     loadBerryModel(),
     loadLeafModel(),
   ]);
-  await loadHumanRunningAnimation();
+  await loadHumanAnimations();
   if (loadingProgressTimer !== null) {
     window.clearInterval(loadingProgressTimer);
     loadingProgressTimer = null;
