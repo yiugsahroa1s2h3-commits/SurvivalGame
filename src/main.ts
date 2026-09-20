@@ -617,40 +617,11 @@ function loadHumanRunningAnimation(): Promise<void> {
       MODEL_PATHS.running,
       (fbx) => {
         const runningClip = fbx.animations[0];
-        // 走りアニメーションの動きを大きくする
-const animationScale = 5;
-
-runningClip.tracks.forEach((track) => {
-  const values = track.values;
-
-  // 回転アニメーションを拡大
-  if (track.name.endsWith('.quaternion')) {
-    for (let i = 0; i < values.length; i += 4) {
-      const q = new THREE.Quaternion(
-        values[i],
-        values[i + 1],
-        values[i + 2],
-        values[i + 3]
-      );
-
-      const axis = new THREE.Vector3();
-      const angle = 2 * Math.acos(THREE.MathUtils.clamp(q.w, -1, 1));
-
-      if (angle > 0.0001) {
-        axis.set(q.x, q.y, q.z).normalize();
-        const scaledQ = new THREE.Quaternion().setFromAxisAngle(
-          axis,
-          angle * animationScale
-        );
-
-        values[i] = scaledQ.x;
-        values[i + 1] = scaledQ.y;
-        values[i + 2] = scaledQ.z;
-        values[i + 3] = scaledQ.w;
-      }
-    }
-  }
-});
+        if (!runningClip) {
+          console.warn(`${MODEL_PATHS.running} にアニメーションクリップがありません。`);
+          resolve();
+          return;
+        }
 
         let hasRenderableMesh = false;
         fbx.traverse((child) => {
